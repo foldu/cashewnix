@@ -122,6 +122,8 @@ in
       port = cfg.nixServePort;
       secretKeyFile = cfg.privateKeyPath;
       openFirewall = cfg.openNixServeFirewall;
+      # original nix-serve is way too slow and will cause errors
+      package = pkgs.nix-serve-ng;
     };
   };
 }
