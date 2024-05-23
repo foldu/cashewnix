@@ -237,6 +237,8 @@ impl Server {
                     return;
                 };
 
+                discover.broadcast_req().await;
+
                 let mut interval = tokio::time::interval(local_cache_config.discovery_refresh_time);
                 let (batch_timer, mut batch_timeout) = DynamicTimer::new();
                 let mut batch: Vec<(std::net::IpAddr, Url)> = Vec::new();

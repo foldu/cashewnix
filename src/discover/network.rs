@@ -4,7 +4,15 @@ use eyre::Context;
 use futures::{StreamExt, TryStreamExt};
 use netlink_packet_route::{
     address::{AddressAttribute, AddressMessage},
-    link::{LinkExtentMask, LinkFlag, LinkLayerType},
+    link::{
+        InfoKind,
+        LinkAttribute,
+        LinkExtentMask,
+        LinkFlag,
+        LinkInfo,
+        LinkLayerType,
+        LinkMessage,
+    },
 };
 use netlink_sys::AsyncSocket;
 use rtnetlink::constants::{RTMGRP_IPV4_IFADDR, RTMGRP_IPV6_IFADDR};
@@ -71,6 +79,7 @@ impl Network {
             // why isn't this a bitfield?
             && header.flags.contains(&LinkFlag::Running)
             && header.flags.contains(&LinkFlag::Broadcast)
+            && !is_virtual_interface(&resp)
             {
                 let mut addrs = addresses
                     .get()
@@ -85,6 +94,22 @@ impl Network {
         }
         Ok(ret)
     }
+}
+
+fn is_virtual_interface(msg: &LinkMessage) -> bool {
+    for attr in &msg.attributes {
+        if let LinkAttribute::LinkInfo(info) = attr {
+            for field in info {
+                match field {
+                    LinkInfo::Kind(InfoKind::Veth) | LinkInfo::Kind(InfoKind::Bridge) => {
+                        return true;
+                    }
+                    _ => (),
+                }
+            }
+        }
+    }
+    false
 }
 
 fn extract_ip(msg: &AddressMessage) -> Option<(IpAddr, Ipv4Addr)> {
