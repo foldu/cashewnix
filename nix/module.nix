@@ -51,7 +51,7 @@ in
 
     enableNixServe = lib.mkOption {
       type = types.bool;
-      default = true;
+      default = false;
       description = ''
         Enable nix-serve to serve packages to the network.
       '';
