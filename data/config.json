@@ -1,5 +1,6 @@
 {
   "port": 3245,
+  "priority": 30,
   "binary_caches": [
     {
       "url": "https://cache.nixos.org",
@@ -19,7 +20,7 @@
   },
   "priority_config": {
     "0": {
-      "timeout": "100ms"
+      "timeout": "500ms"
     }
   }
 }

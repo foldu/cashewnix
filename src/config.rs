@@ -9,6 +9,7 @@ use crate::{discover::proto::LocalCache, signing::parse_ssh_public_key};
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct Config {
+    pub priority: u8,
     pub port: NonZeroU16,
     pub binary_caches: Vec<BinaryCache>,
     #[serde(deserialize_with = "deserialize_public_keys")]

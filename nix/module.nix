@@ -43,6 +43,14 @@ in
               Port to bind to.
             '';
           };
+          priority = lib.mkOption {
+            type = lib.types.ints.u8;
+            default = 30;
+            description = lib.mdDoc ''
+              Priority advertised in /nix-cache-info, highest priority is
+              0 while everything above is lower. Default cache.nixos.org priority is 40.
+            '';
+          };
         };
       };
     };

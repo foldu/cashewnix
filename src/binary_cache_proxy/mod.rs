@@ -25,13 +25,14 @@ use crate::{
     util::DynamicTimer,
 };
 
-async fn cache_info() -> String {
-    String::from(
+async fn cache_info(server: State<Arc<Server>>) -> String {
+    format!(
         "\
 StoreDir: /nix/store
 WantMassQuery: 1
-Priority: 30
+Priority: {}
 ",
+        server.config.priority
     )
 }
 
