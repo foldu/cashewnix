@@ -1,0 +1,25 @@
+{
+  "port": 3245,
+  "binary_caches": [
+    {
+      "url": "https://cache.nixos.org",
+      "priority": 60
+    }
+  ],
+  "public_keys": [
+    "cache.nixos.org-1:6NCHdD59X431o0gWypbMrAURkbJ16ZPMQFGspcDShjY=",
+    "cache.example.org-1:2asqQ4huy7+QY5Ll45TyVtFkmGYdwKzyUW/vODwJDk8="
+  ],
+  "local_binary_caches": {
+    "discovery_refresh_time": "60s",
+    "local_cache": {
+      "advertise": "Ip",
+      "port": 4234
+    }
+  },
+  "priority_config": {
+    "0": {
+      "timeout": "100ms"
+    }
+  }
+}
