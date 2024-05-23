@@ -241,6 +241,7 @@ impl Server {
 
                 let mut interval = tokio::time::interval(local_cache_config.discovery_refresh_time);
                 let (batch_timer, mut batch_timeout) = DynamicTimer::new();
+                // TODO: use BTreeSet or something instead
                 let mut batch: Vec<(std::net::IpAddr, Url)> = Vec::new();
                 let mut last_adv: Option<Instant> = None;
                 let mut local_caches = ahash::HashMap::default();
