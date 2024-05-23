@@ -17,7 +17,7 @@ pub const PORT: u16 = 49745;
 pub const PACKET_MAXIMUM_REASONABLE_SIZE: usize = 1024;
 
 #[derive(serde::Serialize, Eq, PartialEq, serde::Deserialize, Debug, Clone)]
-#[serde(tag = "advertise")]
+#[serde(tag = "advertise", rename_all = "snake_case")]
 pub enum LocalCache {
     Url { url: Url },
     Ip { port: NonZeroU16 },
