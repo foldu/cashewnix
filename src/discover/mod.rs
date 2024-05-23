@@ -65,16 +65,23 @@ impl Discover {
             loop {
                 let mut managed = HashMap::default();
 
-                for (ip, broadcast) in network.find_eligible_ips().await? {
-                    let tx = listener_task(
+                for (ip, broadcast) in network.find_eligible_ips().await.expect("Can't discover IPs") {
+                    let res = listener_task(
                         &mut join_set,
                         ip,
                         broadcast,
                         ctx.clone(),
                         child_token.clone(),
                     )
-                    .await?;
-                    managed.insert(ip, (broadcast, tx));
+                    .await;
+                    match res {
+                        Ok(tx) => {
+                            managed.insert(ip, (broadcast, tx));
+                        }
+                        Err(e) => {
+                            tracing::error!(error =%e, "Failed spawning listener task");
+                        }
+                    }
                 }
 
                 msg_tx.send(Packet::Req).await.unwrap();
