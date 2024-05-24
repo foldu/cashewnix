@@ -12,6 +12,8 @@ use tokio_util::sync::CancellationToken;
 
 use crate::{config::Config, discover::proto::Packet, signing::KeyStore, util::debounce};
 
+use self::proto::ParseError;
+
 mod combinators;
 mod network;
 pub mod proto;
@@ -52,7 +54,7 @@ impl DiscoverCtx {
         sock: &UdpSocket,
     ) -> Result<(), Error> {
         match Packet::parse(buf, &self.keystore) {
-            Ok(Some(packet)) => {
+            Ok(packet) => {
                 tracing::debug!(packet = ?packet, from = %sock_addr, "Received packet");
                 match packet {
                     Packet::Req => {
@@ -67,7 +69,7 @@ impl DiscoverCtx {
                                     &Packet::Adv {
                                         binary_cache: cache.clone(),
                                     }
-                                    .into_bytes(&self.keystore)
+                                    .to_bytes(&self.keystore)
                                     .map_err(|_| Error::MissingKey)?,
                                     (net.broadcast_addr, proto::PORT),
                                 )
@@ -109,7 +111,8 @@ impl DiscoverCtx {
                     }
                 }
             }
-            Ok(None) => {}
+            // ignore all packets that don't have a proper header
+            Err(ParseError::InvalidHeader) => {}
             Err(e) => {
                 tracing::warn!(from = %sock_addr, error = %e, "Received invalid packet");
             }
@@ -122,7 +125,7 @@ impl DiscoverCtx {
             for net in self.managed.values() {
                 tracing::info!(addr = %net.broadcast_addr, "Sending goodbye");
                 sock.send_to(
-                    &Packet::Goodbye.into_bytes(&self.keystore)?,
+                    &Packet::Goodbye.to_bytes(&self.keystore)?,
                     (net.broadcast_addr, proto::PORT),
                 )
                 .await?;
@@ -198,7 +201,7 @@ impl Discover {
                                 for net in ctx.managed.values() {
                                     tracing::debug!(?packet, "Sending");
                                     // TODO: avoid clone
-                                    sock.send_to(&packet.clone().into_bytes(&ctx.keystore)?, (net.broadcast_addr, proto::PORT)).await?;
+                                    sock.send_to(&packet.clone().to_bytes(&ctx.keystore)?, (net.broadcast_addr, proto::PORT)).await?;
                                 }
                             }
                             res = sock.recv_from(&mut buf[..]) => {

@@ -5,7 +5,25 @@ use eyre::ContextCompat;
 use ring_compat::signature::ed25519::Signature;
 use url::Url;
 
-use crate::signing::KeyStore;
+use crate::signing::{KeyStore, VerificationError};
+
+#[derive(serde::Deserialize, serde::Serialize, Debug)]
+enum SignedPacketContent {
+    Adv { binary_cache: LocalCache },
+    Goodbye,
+}
+
+#[derive(serde::Deserialize, serde::Serialize, Debug)]
+enum UntrustedPacketContent {
+    Req,
+}
+
+#[derive(serde::Serialize, Eq, PartialEq, serde::Deserialize, Debug, Clone)]
+#[serde(tag = "advertise", rename_all = "snake_case")]
+pub enum LocalCache {
+    Url { url: Url },
+    Ip { port: NonZeroU16 },
+}
 
 // TODO: maybe use protobuf instead, it'd be kind of annoying if all local caches stopped working
 // after an update because I haven't thought about backwards compatibility
@@ -16,28 +34,10 @@ pub const PORT: u16 = 49745;
 // already pretty big
 pub const PACKET_MAXIMUM_REASONABLE_SIZE: usize = 1024;
 
-#[derive(serde::Serialize, Eq, PartialEq, serde::Deserialize, Debug, Clone)]
-#[serde(tag = "advertise", rename_all = "snake_case")]
-pub enum LocalCache {
-    Url { url: Url },
-    Ip { port: NonZeroU16 },
-}
-
 #[derive(Debug, Eq, PartialEq, Clone)]
 pub enum Packet {
     Adv { binary_cache: LocalCache },
     Goodbye,
-    Req,
-}
-
-#[derive(serde::Deserialize, serde::Serialize, Debug)]
-pub enum SignedPacketContent {
-    Adv { binary_cache: LocalCache },
-    Goodbye,
-}
-
-#[derive(serde::Deserialize, serde::Serialize, Debug)]
-pub enum UntrustedPacketContent {
     Req,
 }
 
@@ -50,9 +50,9 @@ impl<'a> RawPacket<'a> {
     fn parse(buf: &'a [u8]) -> Option<Self> {
         let (buf, _) = tag(buf, MAGIC)?;
 
-        let (buf, has_key) = u8(buf)?;
+        let (buf, has_signature) = u8(buf)?;
 
-        let (buf, signature) = if has_key == 0xff {
+        let (buf, signature) = if has_signature == 0xff {
             let (buf, signature) = take(buf, Signature::BYTE_SIZE)?;
             let signature = Signature::from_slice(signature).ok()?;
             (buf, Some(signature))
@@ -84,46 +84,72 @@ impl From<Packet> for PacketKind {
     }
 }
 
-const MAX_PACKAGE_AGE: u64 = 5;
+#[derive(thiserror::Error, Debug)]
+pub enum ParseError {
+    #[error("Can't parse package header")]
+    InvalidHeader,
+    #[error("Failed verifying package body")]
+    Verify {
+        #[from]
+        source: VerificationError,
+    },
+    #[error("Timestamp of package not current enough")]
+    TimestampDiff,
+
+    #[error("Can't parse package body")]
+    ParseBody {
+        #[from]
+        source: rmp_serde::decode::Error,
+    },
+}
+
+const MAX_PACKAGE_TIME_DIFF: u64 = 5;
 const REALISTIC_MESSAGE_SIZE: usize = 128;
 const TIMESTAMP_SIZE: usize = std::mem::size_of::<u64>();
 
 impl Packet {
-    pub fn parse(buf: &[u8], keystore: &KeyStore) -> Result<Option<Packet>, eyre::Error> {
+    pub fn parse(buf: &[u8], keystore: &KeyStore) -> Result<Packet, ParseError> {
         let Some(raw) = RawPacket::parse(buf) else {
-            return Ok(None);
+            return Err(ParseError::InvalidHeader);
         };
 
         match raw.signature {
             Some(sig) => {
                 keystore.verify(&sig, raw.content)?;
                 let Some((msg, timestamp)) = u64_le(raw.content) else {
-                    eyre::bail!("FIXME");
+                    return Err(ParseError::InvalidHeader);
                 };
 
-                match current_timestamp().checked_sub(timestamp) {
-                    Some(n) if n > MAX_PACKAGE_AGE => eyre::bail!("Package too old"),
-                    None => eyre::bail!("Package from the future"),
-                    _ => (),
+                let now = current_timestamp();
+                let diff = if now < timestamp {
+                    timestamp - now
+                } else {
+                    now - timestamp
+                };
+
+                if diff > MAX_PACKAGE_TIME_DIFF {
+                    return Err(ParseError::TimestampDiff);
                 }
 
                 let content: SignedPacketContent = rmp_serde::from_slice(msg)?;
-                Ok(Some(match content {
+                Ok(match content {
                     SignedPacketContent::Adv { binary_cache } => Packet::Adv { binary_cache },
                     SignedPacketContent::Goodbye => Packet::Goodbye,
-                }))
+                })
             }
             None => {
                 let content: UntrustedPacketContent = rmp_serde::from_slice(raw.content)?;
-                Ok(Some(match content {
+                Ok(match content {
                     UntrustedPacketContent::Req => Packet::Req,
-                }))
+                })
             }
         }
     }
 
-    pub fn into_bytes(self, keystore: &KeyStore) -> Result<Vec<u8>, eyre::Error> {
-        let kind = PacketKind::from(self);
+    pub fn to_bytes(&self, keystore: &KeyStore) -> Result<Vec<u8>, eyre::Error> {
+        // NOTE: always needs to clone because SignedPacketContent etc.
+        // would need to be repeated for reference types
+        let kind = PacketKind::from(self.clone());
         let mut ret: Vec<u8> = Vec::with_capacity(
             MAGIC.len()
                 // signature indicator
@@ -192,9 +218,9 @@ mod tests {
 
         let roundtrip = |packet: Packet| {
             let original = packet.clone();
-            let bytes = packet.into_bytes(&keystore).unwrap();
+            let bytes = packet.to_bytes(&keystore).unwrap();
             assert!(bytes.len() < PACKET_MAXIMUM_REASONABLE_SIZE);
-            assert_eq!(Packet::parse(&bytes, &keystore).unwrap(), Some(original));
+            assert_eq!(Packet::parse(&bytes, &keystore).unwrap(), original);
         };
         roundtrip(Packet::Req);
         roundtrip(Packet::Goodbye);

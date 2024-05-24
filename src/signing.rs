@@ -12,6 +12,10 @@ pub struct KeyStore {
     private: Option<SigningKey>,
 }
 
+#[derive(thiserror::Error, Debug)]
+#[error("Failed verifying signature with any public key")]
+pub struct VerificationError;
+
 impl KeyStore {
     pub fn add_public_key(&mut self, public_key: VerifyingKey) {
         self.public.push(public_key);
@@ -25,14 +29,14 @@ impl KeyStore {
         self.private.as_ref().map(|pair| pair.sign(msg))
     }
 
-    pub fn verify(&self, signature: &Signature, msg: &[u8]) -> Result<(), eyre::Error> {
+    pub fn verify(&self, signature: &Signature, msg: &[u8]) -> Result<(), VerificationError> {
         for key in &self.public {
             if key.verify(msg, signature).is_ok() {
                 return Ok(());
             }
         }
 
-        Err(eyre::format_err!("No valid signing key found"))
+        Err(VerificationError)
     }
 
     pub fn has_private_key(&self) -> bool {
