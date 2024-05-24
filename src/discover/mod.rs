@@ -1,6 +1,10 @@
 use crate::discover::proto::LocalCache;
 use ahash::HashMap;
-use std::{net::IpAddr, sync::Arc, time::Duration};
+use eyre::Context;
+use std::{
+    net::{IpAddr, SocketAddr},
+    time::Duration,
+};
 use url::Url;
 
 use tokio::{net::UdpSocket, sync::mpsc, task::JoinSet};
@@ -12,8 +16,6 @@ mod combinators;
 mod network;
 pub mod proto;
 
-// TODO: clean this up
-
 pub struct Discover {
     msg_tx: mpsc::Sender<Packet>,
 }
@@ -22,6 +24,113 @@ struct DiscoverCtx {
     config: Config,
     keystore: KeyStore,
     event_tx: mpsc::Sender<Event>,
+    managed: HashMap<IpAddr, NetData>,
+}
+
+struct NetData {
+    broadcast_addr: IpAddr,
+}
+
+#[derive(thiserror::Error, Debug)]
+enum Error {
+    #[error("event_tx hung up")]
+    Hungup,
+    #[error("Missing private key")]
+    MissingKey,
+    #[error("Failed sending")]
+    SocketSend {
+        #[source]
+        source: std::io::Error,
+    },
+}
+
+impl DiscoverCtx {
+    async fn handle_datagram(
+        &self,
+        buf: &[u8],
+        sock_addr: SocketAddr,
+        sock: &UdpSocket,
+    ) -> Result<(), Error> {
+        match Packet::parse(buf, &self.keystore) {
+            Ok(Some(packet)) => {
+                tracing::debug!(packet = ?packet, from = %sock_addr, "Received packet");
+                match packet {
+                    Packet::Req => {
+                        if let Some(cache) = self
+                            .config
+                            .local_binary_caches
+                            .as_ref()
+                            .and_then(|entry| entry.local_cache.as_ref())
+                        {
+                            for net in self.managed.values() {
+                                sock.send_to(
+                                    &Packet::Adv {
+                                        binary_cache: cache.clone(),
+                                    }
+                                    .into_bytes(&self.keystore)
+                                    .map_err(|_| Error::MissingKey)?,
+                                    (net.broadcast_addr, proto::PORT),
+                                )
+                                .await
+                                .map_err(|e| Error::SocketSend { source: e })?;
+                            }
+                        }
+                    }
+                    Packet::Adv { binary_cache } => {
+                        let binary_cache_url = match binary_cache {
+                            LocalCache::Url { url } => url,
+                            LocalCache::Ip { port } => {
+                                Url::parse(&format!("http://{}:{}", sock_addr.ip(), port)).unwrap()
+                            }
+                        };
+                        if self
+                            .event_tx
+                            .send(Event::Adv {
+                                source_ip: sock_addr.ip(),
+                                binary_cache_url,
+                            })
+                            .await
+                            .is_err()
+                        {
+                            return Err(Error::Hungup);
+                        }
+                    }
+                    Packet::Goodbye => {
+                        if self
+                            .event_tx
+                            .send(Event::Goodbye {
+                                source_ip: sock_addr.ip(),
+                            })
+                            .await
+                            .is_err()
+                        {
+                            return Err(Error::Hungup);
+                        }
+                    }
+                }
+            }
+            Ok(None) => {}
+            Err(e) => {
+                tracing::warn!(from = %sock_addr, error = %e, "Received invalid packet");
+            }
+        }
+        Ok(())
+    }
+
+    async fn send_goodbye(&self, sock: &UdpSocket) -> Result<(), eyre::Error> {
+        if self.keystore.has_private_key() {
+            for net in self.managed.values() {
+                tracing::info!(addr = %net.broadcast_addr, "Sending goodbye");
+                sock.send_to(
+                    &Packet::Goodbye.into_bytes(&self.keystore)?,
+                    (net.broadcast_addr, proto::PORT),
+                )
+                .await?;
+            }
+        }
+
+        Ok(())
+    }
 }
 
 pub enum Event {
@@ -48,112 +157,86 @@ impl Discover {
 
         let mut addrs_changed = debounce(addrs_changed, Duration::from_millis(500));
 
-        let ctx = Arc::new(DiscoverCtx {
+        let mut ctx = DiscoverCtx {
             config,
             keystore,
             event_tx: event_tx.clone(),
-        });
+            managed: Default::default(),
+        };
 
-        let sock = UdpSocket::bind(("0.0.0.0", proto::PORT)).await?;
+        let sock = UdpSocket::bind(("0.0.0.0", proto::PORT))
+            .await
+            .context("Failed binding discover socket")?;
         sock.set_broadcast(true)?;
 
-        set.spawn({
-            // TODO: reformat this/subdivide into functions this is horrible
-            async move {
+        set.spawn(async move {
                 let mut buf = vec![0; proto::PACKET_MAXIMUM_REASONABLE_SIZE];
                 loop {
-                    let mut managed = HashMap::default();
+                    ctx.managed.clear();
 
+                    // TODO: maybe retry again later instead of panicking
                     for (ip, broadcast) in network.find_eligible_ips().await.expect("Can't discover IPs") {
                         tracing::info!(%ip, broadcast_addr = %broadcast, "Found interface");
-                        managed.insert(ip, broadcast);
+                        ctx.managed.insert(
+                            ip,
+                            NetData {
+                                broadcast_addr: IpAddr::V4(broadcast),
+                            },
+                        );
                     }
 
                     loop {
                         tokio::select! {
                             _ = token.cancelled() => {
-                                if ctx.keystore.has_private_key() {
-                                    for broadcast in managed.values() {
-                                        tracing::info!(addr = %broadcast, "Sending goodbye");
-                                        sock.send_to(&Packet::Goodbye.into_bytes(&ctx.keystore)?, (IpAddr::V4(*broadcast), proto::PORT)).await?;
-                                    }
-                                }
+                                ctx.send_goodbye(&sock).await?;
                                 return Ok(());
                             }
                             _ = addrs_changed.recv() => {
                                 break;
                             }
                             Some(packet) = msg_rx.recv() => {
-                                for broadcast in managed.values() {
+                                for net in ctx.managed.values() {
                                     tracing::debug!(?packet, "Sending");
                                     // TODO: avoid clone
-                                    sock.send_to(&packet.clone().into_bytes(&ctx.keystore)?, (IpAddr::V4(*broadcast), proto::PORT)).await?;
+                                    sock.send_to(&packet.clone().into_bytes(&ctx.keystore)?, (net.broadcast_addr, proto::PORT)).await?;
                                 }
                             }
                             res = sock.recv_from(&mut buf[..]) => {
                                 match res {
                                     Ok((len, sock_addr)) => {
-                                        if managed.contains_key(&sock_addr.ip()) {
+                                        if ctx.managed.contains_key(&sock_addr.ip()) {
                                             continue;
                                         }
                                         if len > buf.len() {
                                             tracing::debug!(from = %sock_addr, %len, "Dropping oversized packet");
                                             continue;
                                         }
-                                        let packet = &buf[..len];
-                                        match Packet::parse(packet, &ctx.keystore) {
-                                            Ok(Some(packet)) => {
-                                                tracing::debug!(packet = ?packet, from = %sock_addr, "Received packet");
-                                                match packet {
-                                                    Packet::Req => {
-                                                        if let Some(cache) = ctx.config.local_binary_caches.as_ref().and_then(|entry| entry.local_cache.as_ref()) {
-                                                            for broadcast in managed.values() {
-                                                                sock.send_to(
-                                                                    &Packet::Adv {
-                                                                        binary_cache: cache.clone(),
-                                                                    }
-                                                                    .into_bytes(&ctx.keystore)?,
-                                                                    (IpAddr::V4(*broadcast), proto::PORT),
-                                                                )
-                                                                .await?;
-                                                            }
-                                                        }
-                                                    }
-                                                    Packet::Adv {
-                                                        binary_cache,
-                                                    } => {
-                                                        let binary_cache_url = match binary_cache {
-                                                            LocalCache::Url { url } => url,
-                                                            LocalCache::Ip { port } => Url::parse(&format!("http://{}:{}", sock_addr.ip(), port)).unwrap(),
-                                                        };
-                                                        if ctx.event_tx.send(Event::Adv { source_ip: sock_addr.ip(), binary_cache_url }).await.is_err() {
-                                                            break;
-                                                        }
-                                                    }
-                                                    Packet::Goodbye => {
-                                                        if ctx.event_tx.send(Event::Goodbye { source_ip: sock_addr.ip()}).await.is_err() {
-                                                            break;
-                                                        }
-                                                    }
+                                        if let Err(e) = ctx.handle_datagram(&buf[..len], sock_addr, &sock).await {
+                                            match e {
+                                                Error::Hungup => {
+                                                    return Ok(());
                                                 }
-                                            }
-                                            Ok(None) => {}
-                                            Err(e) => {
-                                                tracing::warn!(from = %sock_addr, error = %e, "Received invalid packet");
+                                                Error::SocketSend { source } => {
+                                                    tracing::error!(error = %source, "Failed sending");
+                                                }
+                                                Error::MissingKey => {
+                                                    tracing::error!("Tried to sign a packet without a private key");
+                                                }
                                             }
                                         }
                                     }
                                     Err(e) => {
-                                        // FIXME:
-                                        panic!("wut do? {}", e);
+                                        // when can this even happen?
+                                        tracing::error!(error = %e, "Error receiving from socket");
                                     }
+
                                 }
                             }
                             else => return Ok(()),
                         }
                     }
                 }
-        }});
+        });
 
         Ok((Self { msg_tx }, event_rx))
     }
