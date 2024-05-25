@@ -4,6 +4,7 @@ use std::{
     time::{Duration, Instant},
 };
 
+use ahash::HashMap;
 use arc_swap::ArcSwap;
 use axum::{
     extract::{Request, State},
@@ -267,10 +268,9 @@ impl Server {
 
                 let mut interval = tokio::time::interval(local_cache_config.discovery_refresh_time);
                 let (batch_timer, mut batch_timeout) = DynamicTimer::new();
-                // TODO: use BTreeSet or something instead
-                let mut batch: Vec<(std::net::IpAddr, Url)> = Vec::new();
+                let mut batch: HashMap<Url, std::net::IpAddr> = HashMap::default();
                 let mut last_adv: Option<Instant> = None;
-                let mut local_caches = ahash::HashMap::default();
+                let mut local_caches = HashMap::default();
 
                 loop {
                     tokio::select! {
@@ -284,10 +284,10 @@ impl Server {
                         }
                         _ = batch_timeout.recv() => {
                             let caches = server.caches.load();
-                            batch.retain(|item| !caches.contains(&item.1));
+                            batch.retain(|k, _| !caches.contains(k));
                             if !batch.is_empty() {
                                 let mut new_caches: CacheData = CacheData::clone(&caches);
-                                for (ip, url) in batch.drain(0..) {
+                                for (url, ip) in batch.drain() {
                                     tracing::info!(cache = %url, %ip, "Found new local binary caches");
                                     local_caches.insert(ip, url.clone());
                                     new_caches.insert_cache(0, local_cache_config.error_strategy, url);
@@ -330,7 +330,7 @@ impl Server {
                                   } => {
                                       last_adv = Some(Instant::now());
                                       batch_timer.set_timeout(Duration::from_secs(1)).await;
-                                      batch.push((source_ip, binary_cache_url));
+                                      batch.insert(binary_cache_url, source_ip);
                                   }
                             }
                          }
