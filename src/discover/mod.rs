@@ -200,8 +200,7 @@ impl Discover {
                             Some(packet) = msg_rx.recv() => {
                                 for net in ctx.managed.values() {
                                     tracing::debug!(?packet, "Sending");
-                                    // TODO: avoid clone
-                                    sock.send_to(&packet.clone().to_bytes(&ctx.keystore)?, (net.broadcast_addr, proto::PORT)).await?;
+                                    sock.send_to(&packet.to_bytes(&ctx.keystore)?, (net.broadcast_addr, proto::PORT)).await?;
                                 }
                             }
                             res = sock.recv_from(&mut buf[..]) => {
