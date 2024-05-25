@@ -1,7 +1,6 @@
 use std::num::NonZeroU16;
 
 use super::combinators::{tag, take, u64_le, u8};
-use eyre::ContextCompat;
 use ring_compat::signature::ed25519::Signature;
 use url::Url;
 
@@ -103,6 +102,15 @@ pub enum ParseError {
     },
 }
 
+#[derive(thiserror::Error, Debug)]
+pub enum SerializeError {
+    #[error("Package too big")]
+    PackageTooBig { size: usize },
+
+    #[error("Missing private key to sign message")]
+    MissingKey,
+}
+
 const MAX_PACKAGE_TIME_DIFF: u64 = 5;
 const REALISTIC_MESSAGE_SIZE: usize = 128;
 const TIMESTAMP_SIZE: usize = std::mem::size_of::<u64>();
@@ -146,7 +154,7 @@ impl Packet {
         }
     }
 
-    pub fn to_bytes(&self, keystore: &KeyStore) -> Result<Vec<u8>, eyre::Error> {
+    pub fn to_bytes(&self, keystore: &KeyStore) -> Result<Vec<u8>, SerializeError> {
         // NOTE: always needs to clone because SignedPacketContent etc.
         // would need to be repeated for reference types
         let kind = PacketKind::from(self.clone());
@@ -173,9 +181,7 @@ impl Packet {
 
                 let buf = rmp_serde::to_vec(&content).unwrap();
                 body.extend(buf);
-                let signature = keystore
-                    .sign(&body)
-                    .context("Missing private key for this package kind")?;
+                let signature = keystore.sign(&body).ok_or(SerializeError::MissingKey)?;
                 ret.extend(signature.to_bytes());
                 body
             }
@@ -188,7 +194,7 @@ impl Packet {
 
         let size = ret.len();
         if size > UDP_MAX_DATAGRAM_SIZE {
-            eyre::bail!("Packet bigger than maximum UDP datagram");
+            return Err(SerializeError::PackageTooBig { size });
         }
         if size > PACKET_MAXIMUM_REASONABLE_SIZE {
             tracing::warn!(size, "Created packet above reasonable size");
