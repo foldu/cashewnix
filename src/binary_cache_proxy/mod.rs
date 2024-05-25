@@ -25,6 +25,15 @@ use crate::{
     util::DynamicTimer,
 };
 
+#[derive(serde::Deserialize, Clone, Debug, Copy)]
+pub enum ErrorStrategy {
+    Remove,
+    Timeout {
+        #[serde(rename = "for", with = "humantime_serde")]
+        timeout: Duration,
+    },
+}
+
 async fn cache_info(server: State<Arc<Server>>) -> String {
     format!(
         "\
@@ -45,13 +54,8 @@ struct CacheData {
 #[derive(Clone, Copy)]
 struct CacheMeta {
     priority: u8,
-    source: Source,
-}
-
-#[derive(Copy, Clone)]
-enum Source {
-    Local,
-    Explicit,
+    error_strategy: ErrorStrategy,
+    timed_out_until: Option<Instant>,
 }
 
 impl CacheData {
@@ -63,7 +67,7 @@ impl CacheData {
         self.caches.contains_key(cache)
     }
 
-    fn insert_cache(&mut self, priority: u8, source: Source, cache: Url) {
+    fn insert_cache(&mut self, priority: u8, error_strategy: ErrorStrategy, cache: Url) {
         if let Some(meta) = self.caches.get_mut(&cache) {
             if meta.priority != priority {
                 let bucket = self
@@ -75,8 +79,14 @@ impl CacheData {
                 meta.priority = priority;
             }
         } else {
-            self.caches
-                .insert(cache.clone(), CacheMeta { priority, source });
+            self.caches.insert(
+                cache.clone(),
+                CacheMeta {
+                    priority,
+                    error_strategy,
+                    timed_out_until: None,
+                },
+            );
             self.priority_map.entry(priority).or_default().insert(cache);
         }
     }
@@ -97,6 +107,10 @@ impl CacheData {
         }
     }
 
+    fn get_meta(&self, url: &Url) -> Option<&CacheMeta> {
+        self.caches.get(url)
+    }
+
     fn get_meta_mut(&mut self, url: &Url) -> Option<&mut CacheMeta> {
         self.caches.get_mut(url)
     }
@@ -112,7 +126,16 @@ async fn proxy(server: State<Arc<Server>>, req: Request) -> impl IntoResponse {
     for (priority, urls) in caches.iter_priorities() {
         tracing::debug!(priority = priority, caches = ?urls, "Trying");
         let mut requests = FuturesUnordered::new();
+        let now = Instant::now();
         for cache in urls {
+            let meta = caches.get_meta(cache).unwrap();
+
+            if let Some(timed_out_until) = meta.timed_out_until {
+                if timed_out_until > now {
+                    continue;
+                }
+            }
+
             requests.push({
                 let cache = cache.clone();
                 let url = {
@@ -141,6 +164,8 @@ async fn proxy(server: State<Arc<Server>>, req: Request) -> impl IntoResponse {
                 .unwrap_or(Duration::from_secs(5)),
         );
         tokio::pin!(timeout);
+
+        // TODO: error on missed timeout
 
         let start = Instant::now();
         let first_hit = loop {
@@ -209,7 +234,7 @@ impl Server {
     ) -> Result<Arc<Self>, eyre::Error> {
         let mut caches = CacheData::default();
         for host in &config.binary_caches {
-            caches.insert_cache(host.priority, Source::Explicit, host.url.clone());
+            caches.insert_cache(host.priority, host.error_strategy, host.url.clone());
         }
 
         let ugly_hack = if config.local_binary_caches.is_some() {
@@ -265,7 +290,7 @@ impl Server {
                                 for (ip, url) in batch.drain(0..) {
                                     tracing::info!(cache = %url, %ip, "Found new local binary caches");
                                     local_caches.insert(ip, url.clone());
-                                    new_caches.insert_cache(0, Source::Local, url);
+                                    new_caches.insert_cache(0, local_cache_config.error_strategy, url);
                                 }
                                 server.caches.store(Arc::new(new_caches));
                             }
@@ -274,13 +299,14 @@ impl Server {
                             let caches = server.caches.load();
                             let mut new_caches = CacheData::clone(&caches);
                             if let Some(meta) = new_caches.get_meta_mut(&bad_cache) {
-                                match meta.source {
-                                    Source::Local => {
+                                match meta.error_strategy {
+                                    ErrorStrategy::Remove => {
                                         new_caches.remove(&bad_cache);
                                         tracing::info!(cache = %bad_cache, "Removing bad cache");
                                     }
-                                    Source::Explicit => {
-                                        // TODO: time out this cache
+                                    ErrorStrategy::Timeout { timeout } => {
+                                        meta.timed_out_until = Some(Instant::now() + timeout);
+                                        tracing::info!(cache = %bad_cache, ?timeout, "Timed out cache");
                                     }
                                 }
                                 server.caches.store(Arc::new(new_caches));

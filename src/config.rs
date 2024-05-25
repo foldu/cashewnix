@@ -5,7 +5,11 @@ use eyre::Context;
 use ring_compat::signature::ed25519::VerifyingKey;
 use serde::{de::Error as _, Deserialize, Deserializer};
 
-use crate::{discover::proto::LocalCache, signing::parse_ssh_public_key};
+use crate::{
+    binary_cache_proxy::ErrorStrategy,
+    discover::proto::LocalCache,
+    signing::parse_ssh_public_key,
+};
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct Config {
@@ -40,6 +44,18 @@ pub struct PriorityConfig {
 pub struct BinaryCache {
     pub url: url::Url,
     pub priority: u8,
+    #[serde(default = "timeout_strategy_default")]
+    pub error_strategy: ErrorStrategy,
+}
+
+fn timeout_strategy_default() -> ErrorStrategy {
+    ErrorStrategy::Timeout {
+        timeout: Duration::from_secs(5),
+    }
+}
+
+fn remove_strategy_default() -> ErrorStrategy {
+    ErrorStrategy::Remove
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -47,6 +63,8 @@ pub struct BinaryCacheConfig {
     #[serde(with = "humantime_serde")]
     pub discovery_refresh_time: Duration,
     pub local_cache: Option<LocalCache>,
+    #[serde(default = "remove_strategy_default")]
+    pub error_strategy: ErrorStrategy,
 }
 
 impl Config {
