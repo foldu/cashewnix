@@ -4,7 +4,11 @@
   "binary_caches": [
     {
       "url": "https://cache.nixos.org",
-      "priority": 60
+      "priority": 60,
+      "error_strategy": {
+        "type": "timeout",
+        "for": "5s"
+      }
     }
   ],
   "public_keys": [
@@ -16,11 +20,17 @@
     "local_cache": {
       "advertise": "ip",
       "port": 4234
+    },
+    "error_strategy": {
+      "type": "remove"
     }
   },
   "priority_config": {
     "0": {
       "timeout": "500ms"
+    },
+    "60": {
+      "timeout": "5s"
     }
   }
 }

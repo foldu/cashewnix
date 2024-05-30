@@ -27,6 +27,7 @@ use crate::{
 };
 
 #[derive(serde::Deserialize, Clone, Debug, Copy)]
+#[serde(rename_all = "snake_case", tag = "type")]
 pub enum ErrorStrategy {
     Remove,
     Timeout {
