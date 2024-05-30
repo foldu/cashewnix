@@ -18,7 +18,11 @@ pub struct VerificationError;
 
 impl KeyStore {
     pub fn add_public_key(&mut self, public_key: VerifyingKey) {
-        self.public.push(public_key);
+        // NOTE: VerifyingKey doesn't implement Hash or Ord so need to do it like this
+        // probably no noticeable performance impact, this thing isn't called a thousand times
+        if !self.public.contains(&public_key) {
+            self.public.push(public_key);
+        }
     }
 
     pub fn init_private_key(&mut self, key: SigningKey) {
