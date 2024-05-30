@@ -13,6 +13,7 @@ use axum::{
     routing::get,
     Router,
 };
+use dedup::{Deduper, Unique};
 use futures::stream::FuturesUnordered;
 use tokio::sync::mpsc;
 use tokio_stream::StreamExt;
@@ -26,7 +27,10 @@ use crate::{
     util::DynamicTimer,
 };
 
+mod dedup;
+
 #[derive(serde::Deserialize, Clone, Debug, Copy)]
+#[serde(rename_all = "snake_case", tag = "type")]
 pub enum ErrorStrategy {
     Remove,
     Timeout {
@@ -48,8 +52,8 @@ Priority: {}
 
 #[derive(Default, Clone)]
 struct CacheData {
-    priority_map: BTreeMap<u8, BTreeSet<Url>>,
-    caches: BTreeMap<Url, CacheMeta>,
+    priority_map: BTreeMap<u8, BTreeSet<Unique<Url>>>,
+    caches: BTreeMap<Unique<Url>, CacheMeta>,
 }
 
 #[derive(Clone, Copy)]
@@ -60,15 +64,15 @@ struct CacheMeta {
 }
 
 impl CacheData {
-    fn iter_priorities(&self) -> impl Iterator<Item = (&u8, &BTreeSet<Url>)> {
+    fn iter_priorities(&self) -> impl Iterator<Item = (&u8, &BTreeSet<Unique<Url>>)> {
         self.priority_map.iter()
     }
 
-    fn contains(&self, cache: &Url) -> bool {
+    fn contains(&self, cache: &Unique<Url>) -> bool {
         self.caches.contains_key(cache)
     }
 
-    fn insert_cache(&mut self, priority: u8, error_strategy: ErrorStrategy, cache: Url) {
+    fn insert_cache(&mut self, priority: u8, error_strategy: ErrorStrategy, cache: Unique<Url>) {
         if let Some(meta) = self.caches.get_mut(&cache) {
             if meta.priority != priority {
                 let bucket = self
@@ -92,7 +96,7 @@ impl CacheData {
         }
     }
 
-    fn remove(&mut self, url: &Url) -> bool {
+    fn remove(&mut self, url: &Unique<Url>) -> bool {
         if let Some(meta) = self.caches.remove(url) {
             let bucket = self
                 .priority_map
@@ -108,11 +112,11 @@ impl CacheData {
         }
     }
 
-    fn get_meta(&self, url: &Url) -> Option<&CacheMeta> {
+    fn get_meta(&self, url: &Unique<Url>) -> Option<&CacheMeta> {
         self.caches.get(url)
     }
 
-    fn get_meta_mut(&mut self, url: &Url) -> Option<&mut CacheMeta> {
+    fn get_meta_mut(&mut self, url: &Unique<Url>) -> Option<&mut CacheMeta> {
         self.caches.get_mut(url)
     }
 }
@@ -140,7 +144,7 @@ async fn proxy(server: State<Arc<Server>>, req: Request) -> impl IntoResponse {
             requests.push({
                 let cache = cache.clone();
                 let url = {
-                    let mut url = cache.clone();
+                    let mut url = Url::clone(&cache);
                     url.set_path(path);
                     url.set_query(query);
                     url
@@ -182,7 +186,7 @@ async fn proxy(server: State<Arc<Server>>, req: Request) -> impl IntoResponse {
                             None
                         },
                         Err((error, cache)) => {
-                            tracing::error!(%cache, %error, "Error fetching from cache");
+                            tracing::error!(cache = %&*cache, %error, "Error fetching from cache");
                             server.manage_tx.send(cache).await.unwrap();
                             None
                         }
@@ -223,7 +227,7 @@ pub struct Server {
     caches: ArcSwap<CacheData>,
     client: reqwest::Client,
     config: Config,
-    manage_tx: mpsc::Sender<Url>,
+    manage_tx: mpsc::Sender<Unique<Url>>,
 }
 
 impl Server {
@@ -233,9 +237,11 @@ impl Server {
         keystore: KeyStore,
         token: CancellationToken,
     ) -> Result<Arc<Self>, eyre::Error> {
+        let mut deduper: Deduper<Url> = Deduper::new();
         let mut caches = CacheData::default();
         for host in &config.binary_caches {
-            caches.insert_cache(host.priority, host.error_strategy, host.url.clone());
+            let url = deduper.get_or_insert(host.url.clone());
+            caches.insert_cache(host.priority, host.error_strategy, url);
         }
 
         let ugly_hack = if config.local_binary_caches.is_some() {
@@ -268,7 +274,7 @@ impl Server {
 
                 let mut interval = tokio::time::interval(local_cache_config.discovery_refresh_time);
                 let (batch_timer, mut batch_timeout) = DynamicTimer::new();
-                let mut batch: HashMap<Url, std::net::IpAddr> = HashMap::default();
+                let mut batch: HashMap<Unique<Url>, std::net::IpAddr> = HashMap::default();
                 let mut last_adv: Option<Instant> = None;
                 let mut local_caches = HashMap::default();
 
@@ -288,7 +294,7 @@ impl Server {
                             if !batch.is_empty() {
                                 let mut new_caches: CacheData = CacheData::clone(&caches);
                                 for (url, ip) in batch.drain() {
-                                    tracing::info!(cache = %url, %ip, "Found new local binary caches");
+                                    tracing::info!(cache = %&*url, %ip, "Found new local binary caches");
                                     local_caches.insert(ip, url.clone());
                                     new_caches.insert_cache(0, local_cache_config.error_strategy, url);
                                 }
@@ -302,11 +308,11 @@ impl Server {
                                 match meta.error_strategy {
                                     ErrorStrategy::Remove => {
                                         new_caches.remove(&bad_cache);
-                                        tracing::info!(cache = %bad_cache, "Removing bad cache");
+                                        tracing::info!(cache = %&*bad_cache, "Removing bad cache");
                                     }
                                     ErrorStrategy::Timeout { timeout } => {
                                         meta.timed_out_until = Some(Instant::now() + timeout);
-                                        tracing::info!(cache = %bad_cache, ?timeout, "Timed out cache");
+                                        tracing::info!(cache = %&*bad_cache, ?timeout, "Timed out cache");
                                     }
                                 }
                                 server.caches.store(Arc::new(new_caches));
@@ -319,7 +325,7 @@ impl Server {
                                           let caches = server.caches.load();
                                           let mut new_caches = CacheData::clone(&caches);
                                           if new_caches.remove(&url) {
-                                              tracing::info!(%url, "Removed local binary cache")
+                                              tracing::info!(url = %&*url, "Removed local binary cache")
                                           }
                                           server.caches.store(Arc::new(new_caches));
                                       }
@@ -330,7 +336,8 @@ impl Server {
                                   } => {
                                       last_adv = Some(Instant::now());
                                       batch_timer.set_timeout(Duration::from_secs(1)).await;
-                                      batch.insert(binary_cache_url, source_ip);
+                                      let url = deduper.get_or_insert(binary_cache_url);
+                                      batch.insert(url, source_ip);
                                   }
                             }
                          }
