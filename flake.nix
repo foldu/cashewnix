@@ -24,26 +24,58 @@
       system:
       let
         pkgs = nixpkgs.legacyPackages.${system};
-        cashewnix =
+        lib = pkgs.lib;
+        craneLib = crane.mkLib nixpkgs.legacyPackages.${system};
+        src =
+          let
+            isData = path: _type: builtins.match ".*/data/.*" path != null;
+            isDeny = path: _type: builtins.match ".*deny\.toml" != null;
+          in
+          pkgs.lib.cleanSourceWith {
+            src = craneLib.path ./.;
+            filter =
+              path: type: (isData path type) || (craneLib.filterCargoSources path type) || (isDeny path type);
+          };
+        commonArgs =
           let
             cargoToml = builtins.fromTOML (builtins.readFile "${self}/Cargo.toml");
             version = cargoToml.package.version;
             pname = cargoToml.package.name;
-            craneLib = crane.mkLib nixpkgs.legacyPackages.${system};
           in
-          craneLib.buildPackage {
-            inherit pname version;
-            src =
-              let
-                data = path: _type: builtins.match ".*/data/.*" path != null;
-              in
-              pkgs.lib.cleanSourceWith {
-                src = craneLib.path ./.;
-                filter = path: type: (data path type) || (craneLib.filterCargoSources path type);
-              };
+          {
+            inherit src version pname;
+            strictDeps = true;
+
+            buildInputs =
+              [
+                # Add additional build inputs here
+              ]
+              ++ lib.optionals pkgs.stdenv.isDarwin [
+                # Additional darwin specific inputs can be set here
+                pkgs.libiconv
+              ];
+
+            # Additional environment variables can be set directly
+            # MY_CUSTOM_VAR = "some value";
           };
+        cargoArtifacts = craneLib.buildDepsOnly commonArgs;
+        cashewnix = craneLib.buildPackage commonArgs // {
+          doCheck = false;
+          inherit cargoArtifacts;
+        };
       in
       {
+        checks = {
+          deny = craneLib.cargoDeny { inherit src; };
+          nextest = craneLib.cargoNextest (
+            commonArgs
+            // {
+              inherit cargoArtifacts;
+              partitions = 1;
+              partitionType = "count";
+            }
+          );
+        };
         packages = {
           inherit cashewnix;
           default = cashewnix;
