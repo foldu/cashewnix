@@ -15,6 +15,8 @@ use crate::{
 pub struct Config {
     pub priority: u8,
     pub port: NonZeroU16,
+    #[serde(default = "default_cache_timeout", with = "humantime_serde")]
+    pub default_cache_timeout: Duration,
     pub binary_caches: Vec<BinaryCache>,
     #[serde(deserialize_with = "deserialize_public_keys")]
     pub public_keys: Vec<VerifyingKey>,
@@ -56,6 +58,10 @@ fn timeout_strategy_default() -> ErrorStrategy {
 
 fn remove_strategy_default() -> ErrorStrategy {
     ErrorStrategy::Remove
+}
+
+fn default_cache_timeout() -> Duration {
+    Duration::from_secs(5)
 }
 
 #[derive(Debug, Clone, Deserialize)]

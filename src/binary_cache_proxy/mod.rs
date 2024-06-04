@@ -170,7 +170,7 @@ async fn proxy(server: State<Arc<Server>>, req: Request) -> impl IntoResponse {
             .priority_config
             .get(priority)
             .map(|entry| entry.timeout)
-            .unwrap_or(Duration::from_secs(5));
+            .unwrap_or(server.config.default_cache_timeout);
         let timeout = tokio::time::sleep(timeout_duration);
         tokio::pin!(timeout);
 
