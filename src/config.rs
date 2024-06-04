@@ -11,10 +11,14 @@ use crate::{
     signing::parse_ssh_public_key,
 };
 
+// NOTE: when adding or editing a field create a new test config
+// with ./scripts/new_test_config.sh
 #[derive(Debug, Clone, Deserialize)]
 pub struct Config {
     pub priority: u8,
     pub port: NonZeroU16,
+    #[serde(default = "default_cache_timeout", with = "humantime_serde")]
+    pub default_cache_timeout: Duration,
     pub binary_caches: Vec<BinaryCache>,
     #[serde(deserialize_with = "deserialize_public_keys")]
     pub public_keys: Vec<VerifyingKey>,
@@ -58,6 +62,10 @@ fn remove_strategy_default() -> ErrorStrategy {
     ErrorStrategy::Remove
 }
 
+fn default_cache_timeout() -> Duration {
+    Duration::from_secs(5)
+}
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct BinaryCacheConfig {
     #[serde(with = "humantime_serde")]
@@ -84,6 +92,9 @@ mod tests {
     use super::*;
     #[test]
     fn example_config_deserializes() {
-        Config::load("data/config.json").unwrap();
+        for config in std::fs::read_dir("./data/configs").unwrap() {
+            let config = config.unwrap();
+            Config::load(config.path()).unwrap();
+        }
     }
 }

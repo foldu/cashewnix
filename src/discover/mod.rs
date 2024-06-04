@@ -144,6 +144,7 @@ pub enum Event {
         source_ip: IpAddr,
         binary_cache_url: Url,
     },
+    NetworkChanged,
 }
 
 impl Discover {
@@ -158,7 +159,7 @@ impl Discover {
 
         let (network, addrs_changed) = network::Network::new().await?;
 
-        let mut addrs_changed = debounce(addrs_changed, Duration::from_millis(500));
+        let mut addrs_changed = debounce(addrs_changed, Duration::from_secs(2));
 
         let mut ctx = DiscoverCtx {
             config,
@@ -176,6 +177,9 @@ impl Discover {
                 let mut buf = vec![0; proto::PACKET_MAXIMUM_REASONABLE_SIZE];
                 loop {
                     ctx.managed.clear();
+                    if ctx.event_tx.send(Event::NetworkChanged).await.is_err() {
+                        return Ok(());
+                    }
 
                     // TODO: maybe retry again later instead of panicking
                     for (ip, broadcast) in network.find_eligible_ips().await.expect("Can't discover IPs") {

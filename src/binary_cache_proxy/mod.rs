@@ -128,8 +128,15 @@ async fn proxy(server: State<Arc<Server>>, req: Request) -> impl IntoResponse {
     let path = req.uri().path();
     let query = req.uri().query();
 
+    // TODO: maybe make this a Vec<bool> and turn urls from BTreeSet into Vec
+    // so no need for BTreeSet
+    // also gets rid of cache cloning
+    let mut waiting_for = BTreeSet::default();
     for (priority, urls) in caches.iter_priorities() {
         tracing::debug!(priority = priority, caches = ?urls, "Trying");
+        waiting_for.clear();
+        waiting_for.extend(urls);
+
         let mut requests = FuturesUnordered::new();
         let now = Instant::now();
         for cache in urls {
@@ -152,50 +159,43 @@ async fn proxy(server: State<Arc<Server>>, req: Request) -> impl IntoResponse {
                 let client = server.client.clone();
                 let headers = req.headers().clone();
                 async move {
-                    match client.get(url).headers(headers).send().await {
-                        Ok(resp) => Ok(resp),
-                        Err(e) => Err((e, cache)),
-                    }
+                    let ret = client.get(url).headers(headers).send().await;
+                    (ret, cache)
                 }
             });
         }
 
-        let timeout = tokio::time::sleep(
-            server
-                .config
-                .priority_config
-                .get(priority)
-                .map(|entry| entry.timeout)
-                .unwrap_or(Duration::from_secs(5)),
-        );
+        let timeout_duration = server
+            .config
+            .priority_config
+            .get(priority)
+            .map(|entry| entry.timeout)
+            .unwrap_or(server.config.default_cache_timeout);
+        let timeout = tokio::time::sleep(timeout_duration);
         tokio::pin!(timeout);
 
-        // TODO: error on missed timeout
-
         let start = Instant::now();
-        let first_hit = loop {
+        let (first_hit, timed_out) = loop {
             tokio::select! {
                 _ = &mut timeout => {
-                    break None;
+                    break (None, true);
                 }
-                Some(resp) = requests.next() => {
-                    let found = match resp {
-                        Ok(resp) if resp.status() == StatusCode::OK => Some(resp),
+                Some((resp, cache)) = requests.next() => {
+                    waiting_for.remove(&cache);
+                     match resp {
+                        Ok(resp) if resp.status() == StatusCode::OK => {
+                            break (Some(resp), false);
+                        }
                         Ok(resp) => {
                             tracing::debug!(url = %resp.url(), status = %resp.status(), "Got bad status");
-                            None
                         },
-                        Err((error, cache)) => {
+                        Err(error) => {
                             tracing::error!(cache = %&*cache, %error, "Error fetching from cache");
                             server.manage_tx.send(cache).await.unwrap();
-                            None
                         }
                     };
-                    if let Some(url) = found {
-                        break Some(url);
-                    }
                 }
-                else => break None,
+                else => break (None, false),
             }
         };
 
@@ -206,6 +206,11 @@ async fn proxy(server: State<Arc<Server>>, req: Request) -> impl IntoResponse {
                 start.elapsed()
             );
             return Response::from(resp);
+        } else if timed_out {
+            for &cache in &waiting_for {
+                tracing::error!(cache = %&**cache, deadline = ?timeout_duration, "Cache response exceeded deadline");
+                server.manage_tx.send(cache.clone()).await.unwrap();
+            }
         }
     }
 
@@ -270,8 +275,6 @@ impl Server {
                     return;
                 };
 
-                discover.broadcast_req().await;
-
                 let mut interval = tokio::time::interval(local_cache_config.discovery_refresh_time);
                 let (batch_timer, mut batch_timeout) = DynamicTimer::new();
                 let mut batch: HashMap<Unique<Url>, std::net::IpAddr> = HashMap::default();
@@ -320,27 +323,37 @@ impl Server {
                         }
                         Some(event) = events.recv() => {
                             match event {
-                                  Event::Goodbye { source_ip } => {
-                                      if let Some(url) = local_caches.remove(&source_ip) {
-                                          let caches = server.caches.load();
-                                          let mut new_caches = CacheData::clone(&caches);
-                                          if new_caches.remove(&url) {
-                                              tracing::info!(url = %&*url, "Removed local binary cache")
-                                          }
-                                          server.caches.store(Arc::new(new_caches));
-                                      }
-                                  }
-                                  Event::Adv {
-                                      source_ip,
-                                      binary_cache_url,
-                                  } => {
-                                      last_adv = Some(Instant::now());
-                                      batch_timer.set_timeout(Duration::from_secs(1)).await;
-                                      let url = deduper.get_or_insert(binary_cache_url);
-                                      batch.insert(url, source_ip);
-                                  }
+                                Event::NetworkChanged => {
+                                    let caches = server.caches.load();
+                                    let mut new_caches = CacheData::clone(&caches);
+                                    for (_, cache) in local_caches.drain() {
+                                        // TODO: if cache priority overwritten by url restore it
+                                        new_caches.remove(&cache);
+                                    }
+                                    server.caches.store(Arc::new(new_caches));
+                                    discover.broadcast_req().await;
+                                }
+                                Event::Goodbye { source_ip } => {
+                                    if let Some(url) = local_caches.remove(&source_ip) {
+                                        let caches = server.caches.load();
+                                        let mut new_caches = CacheData::clone(&caches);
+                                        if new_caches.remove(&url) {
+                                            tracing::info!(url = %&*url, "Removed local binary cache")
+                                        }
+                                        server.caches.store(Arc::new(new_caches));
+                                    }
+                                }
+                                Event::Adv {
+                                    source_ip,
+                                    binary_cache_url,
+                                } => {
+                                    last_adv = Some(Instant::now());
+                                    batch_timer.set_timeout(Duration::from_secs(1)).await;
+                                    let url = deduper.get_or_insert(binary_cache_url);
+                                    batch.insert(url, source_ip);
+                                }
                             }
-                         }
+                        }
                     }
                 }
             }
