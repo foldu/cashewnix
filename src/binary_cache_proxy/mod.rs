@@ -275,8 +275,6 @@ impl Server {
                     return;
                 };
 
-                discover.broadcast_req().await;
-
                 let mut interval = tokio::time::interval(local_cache_config.discovery_refresh_time);
                 let (batch_timer, mut batch_timeout) = DynamicTimer::new();
                 let mut batch: HashMap<Unique<Url>, std::net::IpAddr> = HashMap::default();
@@ -325,27 +323,37 @@ impl Server {
                         }
                         Some(event) = events.recv() => {
                             match event {
-                                  Event::Goodbye { source_ip } => {
-                                      if let Some(url) = local_caches.remove(&source_ip) {
-                                          let caches = server.caches.load();
-                                          let mut new_caches = CacheData::clone(&caches);
-                                          if new_caches.remove(&url) {
-                                              tracing::info!(url = %&*url, "Removed local binary cache")
-                                          }
-                                          server.caches.store(Arc::new(new_caches));
-                                      }
-                                  }
-                                  Event::Adv {
-                                      source_ip,
-                                      binary_cache_url,
-                                  } => {
-                                      last_adv = Some(Instant::now());
-                                      batch_timer.set_timeout(Duration::from_secs(1)).await;
-                                      let url = deduper.get_or_insert(binary_cache_url);
-                                      batch.insert(url, source_ip);
-                                  }
+                                Event::NetworkChanged => {
+                                    let caches = server.caches.load();
+                                    let mut new_caches = CacheData::clone(&caches);
+                                    for (_, cache) in local_caches.drain() {
+                                        // TODO: if cache priority overwritten by url restore it
+                                        new_caches.remove(&cache);
+                                    }
+                                    server.caches.store(Arc::new(new_caches));
+                                    discover.broadcast_req().await;
+                                }
+                                Event::Goodbye { source_ip } => {
+                                    if let Some(url) = local_caches.remove(&source_ip) {
+                                        let caches = server.caches.load();
+                                        let mut new_caches = CacheData::clone(&caches);
+                                        if new_caches.remove(&url) {
+                                            tracing::info!(url = %&*url, "Removed local binary cache")
+                                        }
+                                        server.caches.store(Arc::new(new_caches));
+                                    }
+                                }
+                                Event::Adv {
+                                    source_ip,
+                                    binary_cache_url,
+                                } => {
+                                    last_adv = Some(Instant::now());
+                                    batch_timer.set_timeout(Duration::from_secs(1)).await;
+                                    let url = deduper.get_or_insert(binary_cache_url);
+                                    batch.insert(url, source_ip);
+                                }
                             }
-                         }
+                        }
                     }
                 }
             }
