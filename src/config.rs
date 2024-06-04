@@ -11,6 +11,8 @@ use crate::{
     signing::parse_ssh_public_key,
 };
 
+// NOTE: when adding or editing a field create a new test config
+// with ./scripts/new_test_config.sh
 #[derive(Debug, Clone, Deserialize)]
 pub struct Config {
     pub priority: u8,
@@ -90,6 +92,9 @@ mod tests {
     use super::*;
     #[test]
     fn example_config_deserializes() {
-        Config::load("data/config.json").unwrap();
+        for config in std::fs::read_dir("./data/configs").unwrap() {
+            let config = config.unwrap();
+            Config::load(config.path()).unwrap();
+        }
     }
 }
