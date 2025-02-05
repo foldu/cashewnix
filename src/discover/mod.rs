@@ -20,6 +20,7 @@ pub mod proto;
 
 pub struct Discover {
     msg_tx: mpsc::Sender<Packet>,
+    token: CancellationToken,
 }
 
 struct DiscoverCtx {
@@ -171,9 +172,12 @@ impl Discover {
         let sock = UdpSocket::bind(("0.0.0.0", proto::PORT))
             .await
             .context("Failed binding discover socket")?;
+
         sock.set_broadcast(true)?;
 
-        set.spawn(async move {
+        set.spawn({
+            let token = token.clone();
+            async move {
                 let mut buf = vec![0; proto::PACKET_MAXIMUM_REASONABLE_SIZE];
                 loop {
                     ctx.managed.clear();
@@ -204,7 +208,11 @@ impl Discover {
                             Some(packet) = msg_rx.recv() => {
                                 for net in ctx.managed.values() {
                                     tracing::debug!(?packet, "Sending");
-                                    sock.send_to(&packet.to_bytes(&ctx.keystore)?, (net.broadcast_addr, proto::PORT)).await?;
+                                    if let Err(e) = sock.send_to(&packet.to_bytes(&ctx.keystore)?, (net.broadcast_addr, proto::PORT)).await {
+                                        tracing::error!("failed to send packet: {:#}, forcing exit", e);
+                                        token.cancel();
+                                        return Err(e).context("failed to send packet")
+                                    }
                                 }
                             }
                             res = sock.recv_from(&mut buf[..]) => {
@@ -242,12 +250,16 @@ impl Discover {
                         }
                     }
                 }
+            }
         });
 
-        Ok((Self { msg_tx }, event_rx))
+        Ok((Self { msg_tx, token }, event_rx))
     }
 
     pub async fn broadcast_req(&self) {
-        self.msg_tx.send(Packet::Req).await.unwrap();
+        if let Err(e) = self.msg_tx.send(Packet::Req).await {
+            tracing::error!("failed to send req packet: {:#}, forcing exit", e);
+            self.token.cancel();
+        }
     }
 }

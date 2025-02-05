@@ -16,6 +16,7 @@ async fn run(config: Config) -> Result<(), eyre::Error> {
     let token = CancellationToken::new();
     let mut set = tokio::task::JoinSet::new();
     let shutdown = {
+        let token = token.clone();
         let signal =
             |sig| tokio::signal::unix::signal(sig).context("Failed installing signal handler");
         let mut int = signal(SignalKind::interrupt())?;
@@ -24,6 +25,7 @@ async fn run(config: Config) -> Result<(), eyre::Error> {
             tokio::select! {
                 _ = term.recv() => (),
                 _ = int.recv() => (),
+                _ = token.cancelled() => (),
             }
         }
     };
