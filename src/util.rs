@@ -2,9 +2,14 @@ use std::time::Duration;
 
 use tokio::sync::mpsc;
 
+use std::pin::Pin;
+
+use tokio::sync::mpsc::error::TrySendError;
+
 pub struct DynamicTimer {
     timeout_tx: mpsc::Sender<Duration>,
 }
+
 
 impl DynamicTimer {
     pub fn new() -> (Self, mpsc::Receiver<()>) {
@@ -12,14 +17,30 @@ impl DynamicTimer {
         let (uuh_tx, uuh_rx) = mpsc::channel(1);
 
         tokio::spawn(async move {
-            loop {
-                let Some(timeout) = timeout_rx.recv().await else {
-                    return;
-                };
+            let mut next_timeout: Pin<Box<dyn std::future::Future<Output = ()> + Send>> = {
+                Box::pin(std::future::pending())
+            };
 
-                tokio::time::sleep(timeout).await;
-                if uuh_tx.send(()).await.is_err() {
-                    return;
+            loop {
+                tokio::select! {
+                    Some(timeout) = timeout_rx.recv() => {
+                        tracing::trace!("new timeout = {:?}", timeout);
+                        next_timeout = Box::pin(tokio::time::sleep(timeout))
+                    },
+                    _ = next_timeout => {
+                        tracing::trace!("timer expired");
+                        if let Err(e) = uuh_tx.try_send(()) {
+                            match e {
+                                TrySendError::Full(_)   => {
+                                    // NOTE: consider triggering a restart if this is not cleared within a certain amount of time
+                                    tracing::warn!("timer expired but main task lagged or blocked")
+                                },
+                                TrySendError::Closed(_) => return,
+                            }
+                        };
+                        next_timeout = Box::pin(std::future::pending())
+                    },
+                    else => return,
                 }
             }
         });

@@ -158,7 +158,7 @@ in
         };
 
         serviceConfig = {
-          Restart = "on-failure";
+          Restart = "always";
           DynamicUser = "yes";
           RuntimeDirectory = "cashewnix";
           StateDirectory = "cashewnix";
