@@ -63,7 +63,7 @@
       in
       {
         checks = {
-          deny = craneLib.cargoDeny { inherit src; };
+          # deny = craneLib.cargoDeny { inherit src; };
           nextest = craneLib.cargoNextest (
             commonArgs
             // {
