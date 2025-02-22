@@ -14,6 +14,10 @@ jobs:
         with:
           fetch-depth: 0
       - uses: cachix/install-nix-action@v30
+      - uses: cachix/cachix-action@v14
+        with:
+          name: foldu
+          authToken: "${{ secrets.CACHIX_AUTH_TOKEN }}"
       - name: "flake.lock: Update"
         run: |
           git config user.name 'github-actions'
