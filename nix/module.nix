@@ -145,7 +145,7 @@ in
 
     systemd.services.cashewnix =
       let
-        pkg = self.packages.${pkgs.system}.cashewnix;
+        pkg = self.packages.${pkgs.stdenv.hostPlatform.system}.cashewnix;
       in
       {
         wantedBy = [
