@@ -26,7 +26,7 @@
         src =
           let
             isData = path: _type: builtins.match ".*/data/.*" path != null;
-            isDeny = path: _type: builtins.match ".*deny\.toml" != null;
+            isDeny = path: _type: builtins.match ".*deny\\.toml" != null;
           in
           pkgs.lib.cleanSourceWith {
             src = craneLib.path ./.;
