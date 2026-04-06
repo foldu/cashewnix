@@ -225,7 +225,7 @@ async fn proxy(server: State<Arc<Server>>, req: Request) -> impl IntoResponse {
 pub fn routes() -> axum::Router<Arc<Server>> {
     Router::new()
         .route("/nix-cache-info", get(cache_info))
-        .route("/*path", get(proxy))
+        .route("/{*path}", get(proxy))
 }
 
 pub struct Server {
