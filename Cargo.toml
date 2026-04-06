@@ -7,7 +7,7 @@ license = "UNLICENSE OR MIT"
 [dependencies]
 tokio = { version = "1.37.0", features = [
   "net",
-  "rt",
+  "rt-multi-thread",
   "signal",
   "macros",
   "time",

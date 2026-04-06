@@ -87,7 +87,7 @@ fn main() -> Result<(), eyre::Error> {
         .with(tracing_subscriber::fmt::layer())
         .init();
 
-    let rt = tokio::runtime::Builder::new_current_thread()
+    let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?;
     let config_path = std::env::var_os("CONFIG_PATH")
