@@ -2,20 +2,14 @@ use std::net::{IpAddr, Ipv4Addr};
 
 use eyre::Context;
 use futures::{StreamExt, TryStreamExt};
-use netlink_packet_route::{
-    address::{AddressAttribute, AddressMessage},
-    link::{
-        InfoKind,
-        LinkAttribute,
-        LinkExtentMask,
-        LinkFlag,
-        LinkInfo,
-        LinkLayerType,
-        LinkMessage,
-    },
-};
 use netlink_sys::AsyncSocket;
 use rtnetlink::constants::{RTMGRP_IPV4_IFADDR, RTMGRP_IPV6_IFADDR};
+use rtnetlink::packet_route::{
+    address::{AddressAttribute, AddressMessage},
+    link::{
+        InfoKind, LinkAttribute, LinkExtentMask, LinkFlags, LinkInfo, LinkLayerType, LinkMessage,
+    },
+};
 use tokio::sync::mpsc;
 
 pub struct Network {
@@ -66,7 +60,7 @@ impl Network {
             .link()
             .get()
             .set_filter_mask(
-                netlink_packet_route::AddressFamily::Inet,
+                rtnetlink::packet_route::AddressFamily::Inet,
                 vec![
                     // skip stats that are never used for shorter reply
                     LinkExtentMask::SkipStats,
@@ -77,8 +71,8 @@ impl Network {
             let header = &resp.header;
             if header.link_layer_type == LinkLayerType::Ether
             // why isn't this a bitfield?
-            && header.flags.contains(&LinkFlag::Running)
-            && header.flags.contains(&LinkFlag::Broadcast)
+            && header.flags.contains(LinkFlags::Running)
+            && header.flags.contains(LinkFlags::Broadcast)
             && !is_virtual_interface(&resp)
             {
                 let mut addrs = addresses
