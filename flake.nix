@@ -35,7 +35,7 @@
           };
         commonArgs =
           let
-            cargoToml = builtins.fromTOML (builtins.readFile "${self}/Cargo.toml");
+            cargoToml = fromTOML (builtins.readFile "${self}/Cargo.toml");
             version = cargoToml.package.version;
             pname = cargoToml.package.name;
           in
