@@ -43,14 +43,13 @@
             inherit src version pname;
             strictDeps = true;
 
-            buildInputs =
-              [
-                # Add additional build inputs here
-              ]
-              ++ lib.optionals pkgs.stdenv.isDarwin [
-                # Additional darwin specific inputs can be set here
-                pkgs.libiconv
-              ];
+            buildInputs = [
+              # Add additional build inputs here
+            ]
+            ++ lib.optionals pkgs.stdenv.isDarwin [
+              # Additional darwin specific inputs can be set here
+              pkgs.libiconv
+            ];
 
             # Additional environment variables can be set directly
             # MY_CUSTOM_VAR = "some value";
