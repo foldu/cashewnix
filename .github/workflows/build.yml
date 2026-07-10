@@ -16,9 +16,9 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: cachix/install-nix-action@v25
-      - uses: cachix/cachix-action@v14
+      - uses: actions/checkout@v7
+      - uses: cachix/install-nix-action@v31
+      - uses: cachix/cachix-action@v17
         with:
           name: foldu
           authToken: "${{ secrets.CACHIX_AUTH_TOKEN }}"
@@ -28,13 +28,13 @@ jobs:
   build-aarch64:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - run: sudo apt-get install -y qemu-user-static
-      - uses: cachix/install-nix-action@v25
+      - uses: cachix/install-nix-action@v31
         with:
           extra_nix_config: |
             system = aarch64-linux
-      - uses: cachix/cachix-action@v14
+      - uses: cachix/cachix-action@v17
         with:
           name: foldu
           authToken: "${{ secrets.CACHIX_AUTH_TOKEN }}"

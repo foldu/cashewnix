@@ -71,6 +71,14 @@
               partitionType = "count";
             }
           );
+        }
+        // lib.optionalAttrs pkgs.stdenv.isLinux {
+          smoke-test-nix-serve = import ./nix/tests/smoke-nix-serve.nix {
+            inherit self pkgs lib;
+          };
+          smoke-test-harmonia = import ./nix/tests/smoke-harmonia.nix {
+            inherit self pkgs lib;
+          };
         };
         packages = {
           inherit cashewnix;

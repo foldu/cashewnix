@@ -30,18 +30,48 @@ be added to the configuration of all devices, otherwise this node will be ignore
 it can't authenticate itself.
 
 An example for a minimal configuration which shares the local store
-with the network:
+with the network over nix-serve(next harmonia option is recommended over this):
 ```nix
 services.cashewnix = {
   enable = true;
   enableNixServe = true;
   privateKeyPath = "/var/secrets/cashewnix-private";
-  settings.public_keys = [ 
+  settings.public_keys = [
     "cache.example.org-1:2asqQ4huy7+QY5Ll45TyVtFkmGYdwKzyUW/vODwJDk8="
   ];
 };
 
 services.nix-serve.openFirewall = true;
+```
+
+Or with harmonia instead of nix-serve:
+```nix
+let
+  harmoniaPort = 5000;
+in
+{
+  services.cashewnix = {
+    enable = true;
+    privateKeyPath = "/var/secrets/cashewnix-private";
+    local_binary_caches.local_cache = {
+      advertise = "ip";
+      port = harmoniaPort;
+    };
+    settings.public_keys = [
+      "cache.example.org-1:2asqQ4huy7+QY5Ll45TyVtFkmGYdwKzyUW/vODwJDk8="
+    ];
+  };
+  
+  services.harmonia.cache = {
+    enable = true;
+    signKeyPaths = [ "/var/secrets/cashewnix-private" ];
+    settings = {
+      bind = "0.0.0.0:${toString cfg.harmoniaPort}";
+    };
+  };
+  
+  networking.firewall.allowedTCPPorts = [ harmoniaPort ];
+}
 ```
 
 A configuration that can pull from other nodes but doesn't
