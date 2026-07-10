@@ -71,6 +71,11 @@
               partitionType = "count";
             }
           );
+        }
+        // lib.optionalAttrs pkgs.stdenv.isLinux {
+          smoke-test = import ./nix/tests/smoke.nix {
+            inherit self pkgs lib;
+          };
         };
         packages = {
           inherit cashewnix;
