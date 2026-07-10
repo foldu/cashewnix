@@ -14,7 +14,7 @@ let
       (lib.recursiveUpdate cfg.settings {
         local_binary_caches.local_cache = {
           advertise = "ip";
-          port = config.services.nix-serve.port;
+          port = cfg.harmoniaPort;
         };
       })
     else
@@ -38,7 +38,7 @@ in
       example = "/var/secrets/cashewnix-private";
       default = null;
       description = lib.mdDoc ''
-        Path to the private key. This is shared with nix-serve.
+        Path to the private key. This is shared with harmonia.
       '';
     };
 
@@ -128,7 +128,15 @@ in
       type = types.bool;
       default = false;
       description = lib.mdDoc ''
-        Enable nix-serve to serve packages to the network.
+        Enable harmonia to serve packages to the network.
+      '';
+    };
+
+    harmoniaPort = lib.mkOption {
+      type = types.port;
+      default = 5000;
+      description = lib.mdDoc ''
+        Port for harmonia to listen on.
       '';
     };
   };
@@ -137,7 +145,7 @@ in
     assertions = [
       {
         assertion = !cfg.enableNixServe || (cfg.privateKeyPath != null);
-        message = "privateKeyPath must be defined if nix-serve is enabled";
+        message = "privateKeyPath must be defined if harmonia is enabled";
       }
     ];
 
@@ -183,11 +191,12 @@ in
       };
     };
 
-    services.nix-serve = lib.mkIf cfg.enableNixServe {
+    services.harmonia.cache = lib.mkIf cfg.enableNixServe {
       enable = true;
-      secretKeyFile = cfg.privateKeyPath;
-      # original nix-serve is way too slow and will cause errors
-      package = pkgs.nix-serve-ng;
+      signKeyPaths = lib.optionals (cfg.privateKeyPath != null) [ cfg.privateKeyPath ];
+      settings = {
+        bind = "[::]:${toString cfg.harmoniaPort}";
+      };
     };
   };
 }

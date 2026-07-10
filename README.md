@@ -41,7 +41,7 @@ services.cashewnix = {
   ];
 };
 
-services.nix-serve.openFirewall = true;
+networking.firewall.allowedTCPPorts = [ 5000 ]; # harmonia port
 ```
 
 A configuration that can pull from other nodes but doesn't
