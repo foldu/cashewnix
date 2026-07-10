@@ -12,7 +12,7 @@ let
   '';
 in
 pkgs.testers.nixosTest {
-  name = "cashewnix";
+  name = "cashewnix-nix-serve";
 
   nodes.machine =
     { ... }:
@@ -35,38 +35,33 @@ pkgs.testers.nixosTest {
   testScript =
     { nodes, ... }:
     let
-      testPort = toString nodes.machine.services.cashewnix.settings.port;
-      harmoniaPort = toString nodes.machine.services.cashewnix.harmoniaPort;
+      cashewnixPort = toString nodes.machine.services.cashewnix.settings.port;
+      nixServePort = toString nodes.machine.services.nix-serve.port;
     in
     ''
       start_all()
 
       # Wait for services to come up
       machine.wait_for_unit("cashewnix.service")
-      # harmonia uses socket activation, wait for the socket, then
-      # the first curl will trigger the actual service to start.
-      machine.wait_for_unit("harmonia.socket")
-      machine.wait_for_open_port(${testPort})
+      machine.wait_for_unit("nix-serve.service")
+      machine.wait_for_open_port(${cashewnixPort})
+      machine.wait_for_open_port(${nixServePort})
 
       with subtest("cashewnix /nix-cache-info"):
-          output = machine.succeed("curl -sS http://127.0.0.1:${testPort}/nix-cache-info")
+          output = machine.succeed("curl -sS http://127.0.0.1:${cashewnixPort}/nix-cache-info")
           assert "StoreDir: /nix/store" in output, f"unexpected /nix-cache-info from cashewnix: {output}"
           assert "WantMassQuery: 1" in output, f"unexpected /nix-cache-info from cashewnix: {output}"
           assert "Priority: 30" in output, f"unexpected /nix-cache-info from cashewnix: {output}"
 
-      with subtest("harmonia /nix-cache-info"):
-          # This first request activates the socket-activated harmonia service
-          machine.wait_until_succeeds("curl -sS http://127.0.0.1:${harmoniaPort}/nix-cache-info")
-          output = machine.succeed("curl -sS http://127.0.0.1:${harmoniaPort}/nix-cache-info")
-          assert "StoreDir: /nix/store" in output, f"unexpected /nix-cache-info from harmonia: {output}"
+      with subtest("nix-serve /nix-cache-info"):
+          output = machine.succeed("curl -sS http://127.0.0.1:${nixServePort}/nix-cache-info")
+          assert "StoreDir: /nix/store" in output, f"unexpected /nix-cache-info from nix-serve: {output}"
 
-      with subtest("nix can reach harmonia as a substituter"):
-          # Verify nix can query harmonia's nix-cache-info via the
-          # standard nix binary cache protocol — not just HTTP.
+      with subtest("nix can reach nix-serve as a substituter"):
           result = machine.succeed(
-              "nix-store --query --substituters http://127.0.0.1:${harmoniaPort} "
+              "nix-store --query --substituters http://127.0.0.1:${nixServePort} "
               "--dry-run /run/current-system 2>&1 || true"
           )
-          print(f"nix-store reached harmonia: {result[:200]}")
+          print(f"nix-store reached nix-serve: {result[:200]}")
     '';
 }
