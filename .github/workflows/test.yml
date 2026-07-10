@@ -10,6 +10,9 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - uses: cachix/install-nix-action@v31
+        with:
+          enable_kvm: true
+          extra_nix_config: "system-features = nixos-test benchmark big-parallel kvm"
       - uses: cachix/cachix-action@v17
         with:
           name: foldu
