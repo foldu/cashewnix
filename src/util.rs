@@ -10,16 +10,14 @@ pub struct DynamicTimer {
     timeout_tx: mpsc::Sender<Duration>,
 }
 
-
 impl DynamicTimer {
     pub fn new() -> (Self, mpsc::Receiver<()>) {
         let (timeout_tx, mut timeout_rx) = mpsc::channel(1);
-        let (uuh_tx, uuh_rx) = mpsc::channel(1);
+        let (tick_tx, tick_rx) = mpsc::channel(1);
 
         tokio::spawn(async move {
-            let mut next_timeout: Pin<Box<dyn std::future::Future<Output = ()> + Send>> = {
-                Box::pin(std::future::pending())
-            };
+            let mut next_timeout: Pin<Box<dyn std::future::Future<Output = ()> + Send>> =
+                { Box::pin(std::future::pending()) };
 
             loop {
                 tokio::select! {
@@ -29,7 +27,7 @@ impl DynamicTimer {
                     },
                     _ = next_timeout => {
                         tracing::trace!("timer expired");
-                        if let Err(e) = uuh_tx.try_send(()) {
+                        if let Err(e) = tick_tx.try_send(()) {
                             match e {
                                 TrySendError::Full(_)   => {
                                     // NOTE: consider triggering a restart if this is not cleared within a certain amount of time
@@ -44,7 +42,7 @@ impl DynamicTimer {
                 }
             }
         });
-        (Self { timeout_tx }, uuh_rx)
+        (Self { timeout_tx }, tick_rx)
     }
 
     pub async fn set_timeout(&self, timeout: Duration) {
