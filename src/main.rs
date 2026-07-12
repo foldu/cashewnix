@@ -1,3 +1,4 @@
+use axum::serve::ListenerExt;
 use config::Config;
 use eyre::{Context, ContextCompat};
 use tokio::{net::TcpListener, signal::unix::SignalKind};
@@ -52,7 +53,13 @@ async fn run(config: Config) -> Result<(), eyre::Error> {
     let port = config.port;
     let server = Server::new(&mut set, config, keystore, token.clone()).await?;
     let router = binary_cache_proxy::routes().with_state(server);
-    let listener = TcpListener::bind(("127.0.0.1", port.get())).await?;
+    let listener = TcpListener::bind(("127.0.0.1", port.get()))
+        .await?
+        .tap_io(|tcp_stream| {
+            if let Err(e) = tcp_stream.set_nodelay(true) {
+                tracing::warn!(error = %e, "Failed setting tcp_no_delay");
+            }
+        });
 
     axum::serve(listener, router)
         .with_graceful_shutdown(shutdown)
