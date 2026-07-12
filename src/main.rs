@@ -70,13 +70,12 @@ async fn run(config: Config) -> Result<(), eyre::Error> {
     token.cancel();
 
     while let Some(res) = set.join_next().await {
-        // FIXME:
         match res {
             Ok(Err(e)) => {
-                Err(e).context("Failed joining task")?;
+                tracing::warn!(error = %e, "Task finished with error during shutdown");
             }
             Err(e) => {
-                Err(e).context("Task crashed")?;
+                tracing::warn!(error = %e, "Task panicked during shutdown");
             }
             _ => (),
         }
