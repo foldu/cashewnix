@@ -41,11 +41,7 @@ pub enum ErrorStrategy {
 
 async fn cache_info(server: State<Arc<Server>>) -> String {
     format!(
-        "\
-StoreDir: /nix/store
-WantMassQuery: 1
-Priority: {}
-",
+        "StoreDir: /nix/store\nWantMassQuery: 1\nPriority: {}\n",
         server.config.priority
     )
 }
