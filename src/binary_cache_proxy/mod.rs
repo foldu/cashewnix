@@ -80,6 +80,9 @@ impl CacheData {
                     .get_mut(&meta.priority)
                     .expect("Invalid state");
                 bucket.remove(&cache);
+                if bucket.is_empty() {
+                    self.priority_map.remove(&meta.priority);
+                }
                 self.priority_map.entry(priority).or_default().insert(cache);
                 meta.priority = priority;
             }
@@ -363,5 +366,153 @@ impl Server {
         }
 
         Ok(ret)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use dedup::Deduper;
+    use url::Url;
+
+    use super::*;
+
+    #[test]
+    fn insert_and_contains() {
+        let mut d = Deduper::new();
+        let a = d.get_or_insert(Url::parse("http://a.example").unwrap());
+        let b = d.get_or_insert(Url::parse("http://b.example").unwrap());
+
+        let mut c = CacheData::default();
+        c.insert_cache(5, ErrorStrategy::Remove, a.clone());
+        assert!(c.contains(&a));
+        assert!(!c.contains(&b));
+    }
+
+    #[test]
+    fn insert_twice_same_priority_is_noop() {
+        let mut d = Deduper::new();
+        let u = d.get_or_insert(Url::parse("http://a.example").unwrap());
+
+        let mut c = CacheData::default();
+        c.insert_cache(5, ErrorStrategy::Remove, u.clone());
+        c.insert_cache(5, ErrorStrategy::Remove, u.clone());
+        // Still one entry in the priority bucket.
+        let priorities: Vec<_> = c
+            .iter_priorities()
+            .map(|(p, urls)| (*p, urls.len()))
+            .collect();
+        assert_eq!(priorities, vec![(5, 1)]);
+    }
+
+    #[test]
+    fn reprioritize_moves_between_buckets() {
+        let mut d = Deduper::new();
+        let u = d.get_or_insert(Url::parse("http://a.example").unwrap());
+
+        let mut c = CacheData::default();
+        c.insert_cache(5, ErrorStrategy::Remove, u.clone());
+        c.insert_cache(3, ErrorStrategy::Remove, u.clone());
+
+        let priorities: Vec<_> = c
+            .iter_priorities()
+            .map(|(p, urls)| (*p, urls.len()))
+            .collect();
+        // Priority 5 bucket should be gone, priority 3 has the URL.
+        assert_eq!(priorities, vec![(3, 1)]);
+        assert_eq!(c.get_meta(&u).unwrap().priority, 3);
+    }
+
+    #[test]
+    fn remove_existing() {
+        let mut d = Deduper::new();
+        let u = d.get_or_insert(Url::parse("http://a.example").unwrap());
+
+        let mut c = CacheData::default();
+        c.insert_cache(5, ErrorStrategy::Remove, u.clone());
+        assert!(c.remove(&u));
+        assert!(!c.contains(&u));
+        assert!(c.iter_priorities().next().is_none());
+    }
+
+    #[test]
+    fn remove_nonexistent() {
+        let mut d = Deduper::new();
+        let u = d.get_or_insert(Url::parse("http://a.example").unwrap());
+
+        let mut c = CacheData::default();
+        assert!(!c.remove(&u));
+    }
+
+    #[test]
+    fn remove_last_in_bucket_cleans_priority() {
+        let mut d = Deduper::new();
+        let u = d.get_or_insert(Url::parse("http://a.example").unwrap());
+        let v = d.get_or_insert(Url::parse("http://b.example").unwrap());
+
+        let mut c = CacheData::default();
+        c.insert_cache(3, ErrorStrategy::Remove, u.clone());
+        c.insert_cache(5, ErrorStrategy::Remove, v.clone());
+
+        c.remove(&v);
+        let priorities: Vec<u8> = c.iter_priorities().map(|(p, _)| *p).collect();
+        assert_eq!(priorities, vec![3]);
+    }
+
+    #[test]
+    fn get_meta_and_get_meta_mut() {
+        let mut d = Deduper::new();
+        let u = d.get_or_insert(Url::parse("http://a.example").unwrap());
+        let nope = d.get_or_insert(Url::parse("http://nope.example").unwrap());
+
+        let mut c = CacheData::default();
+        c.insert_cache(
+            2,
+            ErrorStrategy::Timeout {
+                timeout: Duration::from_secs(30),
+            },
+            u.clone(),
+        );
+
+        let meta = c.get_meta(&u).unwrap();
+        assert_eq!(meta.priority, 2);
+        assert!(meta.timed_out_until.is_none());
+
+        c.get_meta_mut(&u).unwrap().timed_out_until = Some(Instant::now());
+        assert!(c.get_meta(&u).unwrap().timed_out_until.is_some());
+
+        assert!(c.get_meta(&nope).is_none());
+        assert!(c.get_meta_mut(&nope).is_none());
+    }
+
+    #[test]
+    fn iter_priorities_respects_order() {
+        let mut d = Deduper::new();
+        let a = d.get_or_insert(Url::parse("http://a.example").unwrap());
+        let b = d.get_or_insert(Url::parse("http://b.example").unwrap());
+        let c_url = d.get_or_insert(Url::parse("http://c.example").unwrap());
+
+        let mut c = CacheData::default();
+        c.insert_cache(9, ErrorStrategy::Remove, a);
+        c.insert_cache(1, ErrorStrategy::Remove, b);
+        c.insert_cache(5, ErrorStrategy::Remove, c_url);
+
+        let priorities: Vec<u8> = c.iter_priorities().map(|(p, _)| *p).collect();
+        assert_eq!(priorities, vec![1, 5, 9]);
+    }
+
+    #[test]
+    fn multiple_urls_same_priority() {
+        let mut d = Deduper::new();
+        let a = d.get_or_insert(Url::parse("http://a.example").unwrap());
+        let b = d.get_or_insert(Url::parse("http://b.example").unwrap());
+
+        let mut c = CacheData::default();
+        c.insert_cache(3, ErrorStrategy::Remove, a.clone());
+        c.insert_cache(3, ErrorStrategy::Remove, b.clone());
+
+        let (_, urls) = c.iter_priorities().next().unwrap();
+        assert_eq!(urls.len(), 2);
+        assert!(urls.contains(&a));
+        assert!(urls.contains(&b));
     }
 }
