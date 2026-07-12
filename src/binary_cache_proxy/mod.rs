@@ -191,7 +191,9 @@ async fn proxy(server: State<Arc<Server>>, req: Request) -> impl IntoResponse {
                         },
                         Err(error) => {
                             tracing::error!(cache = %&*cache, %error, "Error fetching from cache");
-                            server.manage_tx.send(cache).await.unwrap();
+                            if let Some(tx) = &server.manage_tx {
+                                let _ = tx.send(cache).await;
+                            }
                         }
                     };
                 }
@@ -209,7 +211,9 @@ async fn proxy(server: State<Arc<Server>>, req: Request) -> impl IntoResponse {
         } else if timed_out {
             for &cache in &waiting_for {
                 tracing::error!(cache = %&**cache, deadline = ?timeout_duration, "Cache response exceeded deadline");
-                server.manage_tx.send(cache.clone()).await.unwrap();
+                if let Some(tx) = &server.manage_tx {
+                    let _ = tx.send(cache.clone()).await;
+                }
             }
         }
     }
@@ -232,7 +236,7 @@ pub struct Server {
     caches: ArcSwap<CacheData>,
     client: reqwest::Client,
     config: Config,
-    manage_tx: mpsc::Sender<Unique<Url>>,
+    manage_tx: Option<mpsc::Sender<Unique<Url>>>,
 }
 
 impl Server {
@@ -249,13 +253,12 @@ impl Server {
             caches.insert_cache(host.priority, host.error_strategy, url);
         }
 
-        let ugly_hack = if config.local_binary_caches.is_some() {
-            Some(Discover::run(set, config.clone(), keystore, token).await?)
+        let (manage_tx, manage_rx) = if config.local_binary_caches.is_some() {
+            let (tx, rx) = mpsc::channel(1);
+            (Some(tx), Some(rx))
         } else {
-            None
+            (None, None)
         };
-
-        let (manage_tx, mut manage_rx) = mpsc::channel(1);
 
         let ret = Arc::new(Self {
             caches: ArcSwap::new(Arc::new(caches)),
@@ -264,100 +267,100 @@ impl Server {
             manage_tx,
         });
 
-        tokio::spawn({
-            let server = ret.clone();
-            async move {
-                let Some(local_cache_config) = &server.config.local_binary_caches else {
-                    return;
-                };
+        if let (Some(mut manage_rx), Some(local_cache_config)) =
+            (manage_rx, ret.config.local_binary_caches.clone())
+        {
+            let (discover, mut events) =
+                Discover::run(set, ret.config.clone(), keystore, token).await?;
 
-                let Some((discover, mut events)) = ugly_hack else {
-                    return;
-                };
+            tokio::spawn({
+                let server = ret.clone();
+                async move {
+                    let mut interval =
+                        tokio::time::interval(local_cache_config.discovery_refresh_time);
+                    let (batch_timer, mut batch_timeout) = DynamicTimer::new();
+                    let mut batch: HashMap<Unique<Url>, std::net::IpAddr> = HashMap::default();
+                    let mut last_adv: Option<Instant> = None;
+                    let mut local_caches = HashMap::default();
 
-                let mut interval = tokio::time::interval(local_cache_config.discovery_refresh_time);
-                let (batch_timer, mut batch_timeout) = DynamicTimer::new();
-                let mut batch: HashMap<Unique<Url>, std::net::IpAddr> = HashMap::default();
-                let mut last_adv: Option<Instant> = None;
-                let mut local_caches = HashMap::default();
-
-                loop {
-                    tokio::select! {
-                        _ = interval.tick() => {
-                            match last_adv {
-                                Some(last_adv) if last_adv.elapsed() < local_cache_config.discovery_refresh_time => {}
-                                _ => {
-                                    discover.broadcast_req().await;
-                                }
-                            }
-                        }
-                        _ = batch_timeout.recv() => {
-                            let caches = server.caches.load();
-                            batch.retain(|k, _| !caches.contains(k));
-                            if !batch.is_empty() {
-                                let mut new_caches: CacheData = CacheData::clone(&caches);
-                                for (url, ip) in batch.drain() {
-                                    tracing::info!(cache = %&*url, %ip, "Found new local binary caches");
-                                    local_caches.insert(ip, url.clone());
-                                    new_caches.insert_cache(0, local_cache_config.error_strategy, url);
-                                }
-                                server.caches.store(Arc::new(new_caches));
-                            }
-                        }
-                        Some(bad_cache) = manage_rx.recv() => {
-                            let caches = server.caches.load();
-                            let mut new_caches = CacheData::clone(&caches);
-                            if let Some(meta) = new_caches.get_meta_mut(&bad_cache) {
-                                match meta.error_strategy {
-                                    ErrorStrategy::Remove => {
-                                        new_caches.remove(&bad_cache);
-                                        tracing::info!(cache = %&*bad_cache, "Removing bad cache");
-                                    }
-                                    ErrorStrategy::Timeout { timeout } => {
-                                        meta.timed_out_until = Some(Instant::now() + timeout);
-                                        tracing::info!(cache = %&*bad_cache, ?timeout, "Timed out cache");
+                    loop {
+                        tokio::select! {
+                            _ = interval.tick() => {
+                                match last_adv {
+                                    Some(last_adv) if last_adv.elapsed() < local_cache_config.discovery_refresh_time => {}
+                                    _ => {
+                                        discover.broadcast_req().await;
                                     }
                                 }
-                                server.caches.store(Arc::new(new_caches));
                             }
-                        }
-                        Some(event) = events.recv() => {
-                            match event {
-                                Event::NetworkChanged => {
-                                    let caches = server.caches.load();
-                                    let mut new_caches = CacheData::clone(&caches);
-                                    for (_, cache) in local_caches.drain() {
-                                        // TODO: if cache priority overwritten by url restore it
-                                        new_caches.remove(&cache);
+                            _ = batch_timeout.recv() => {
+                                let caches = server.caches.load();
+                                batch.retain(|k, _| !caches.contains(k));
+                                if !batch.is_empty() {
+                                    let mut new_caches: CacheData = CacheData::clone(&caches);
+                                    for (url, ip) in batch.drain() {
+                                        tracing::info!(cache = %&*url, %ip, "Found new local binary caches");
+                                        local_caches.insert(ip, url.clone());
+                                        new_caches.insert_cache(0, local_cache_config.error_strategy, url);
                                     }
                                     server.caches.store(Arc::new(new_caches));
-                                    discover.broadcast_req().await;
                                 }
-                                Event::Goodbye { source_ip } => {
-                                    if let Some(url) = local_caches.remove(&source_ip) {
+                            }
+                            Some(bad_cache) = manage_rx.recv() => {
+                                let caches = server.caches.load();
+                                let mut new_caches = CacheData::clone(&caches);
+                                if let Some(meta) = new_caches.get_meta_mut(&bad_cache) {
+                                    match meta.error_strategy {
+                                        ErrorStrategy::Remove => {
+                                            new_caches.remove(&bad_cache);
+                                            tracing::info!(cache = %&*bad_cache, "Removing bad cache");
+                                        }
+                                        ErrorStrategy::Timeout { timeout } => {
+                                            meta.timed_out_until = Some(Instant::now() + timeout);
+                                            tracing::info!(cache = %&*bad_cache, ?timeout, "Timed out cache");
+                                        }
+                                    }
+                                    server.caches.store(Arc::new(new_caches));
+                                }
+                            }
+                            Some(event) = events.recv() => {
+                                match event {
+                                    Event::NetworkChanged => {
                                         let caches = server.caches.load();
                                         let mut new_caches = CacheData::clone(&caches);
-                                        if new_caches.remove(&url) {
-                                            tracing::info!(url = %&*url, "Removed local binary cache")
+                                        for (_, cache) in local_caches.drain() {
+                                            // TODO: if cache priority overwritten by url restore it
+                                            new_caches.remove(&cache);
                                         }
                                         server.caches.store(Arc::new(new_caches));
+                                        discover.broadcast_req().await;
                                     }
-                                }
-                                Event::Adv {
-                                    source_ip,
-                                    binary_cache_url,
-                                } => {
-                                    last_adv = Some(Instant::now());
-                                    batch_timer.set_timeout(Duration::from_secs(1)).await;
-                                    let url = deduper.get_or_insert(binary_cache_url);
-                                    batch.insert(url, source_ip);
+                                    Event::Goodbye { source_ip } => {
+                                        if let Some(url) = local_caches.remove(&source_ip) {
+                                            let caches = server.caches.load();
+                                            let mut new_caches = CacheData::clone(&caches);
+                                            if new_caches.remove(&url) {
+                                                tracing::info!(url = %&*url, "Removed local binary cache")
+                                            }
+                                            server.caches.store(Arc::new(new_caches));
+                                        }
+                                    }
+                                    Event::Adv {
+                                        source_ip,
+                                        binary_cache_url,
+                                    } => {
+                                        last_adv = Some(Instant::now());
+                                        batch_timer.set_timeout(Duration::from_secs(1)).await;
+                                        let url = deduper.get_or_insert(binary_cache_url);
+                                        batch.insert(url, source_ip);
+                                    }
                                 }
                             }
                         }
                     }
                 }
-            }
-        });
+            });
+        }
 
         Ok(ret)
     }
