@@ -186,14 +186,21 @@ impl Discover {
                     }
 
                     // TODO: maybe retry again later instead of panicking
-                    for (ip, broadcast) in network.find_eligible_ips().await.expect("Can't discover IPs") {
-                        tracing::info!(%ip, broadcast_addr = %broadcast, "Found interface");
-                        ctx.managed.insert(
-                            ip,
-                            NetData {
-                                broadcast_addr: IpAddr::V4(broadcast),
-                            },
-                        );
+                    match network.find_eligible_ips().await {
+                        Ok(ips) => {
+                            for (ip, broadcast) in ips {
+                                tracing::info!(%ip, broadcast_addr = %broadcast, "Found interface");
+                                ctx.managed.insert(
+                                    ip,
+                                    NetData {
+                                        broadcast_addr: IpAddr::V4(broadcast),
+                                    },
+                                );
+                            }
+                        }
+                        Err(e) => {
+                            tracing::error!(error = %e, "Failed to discover IPs, will retry on next network change");
+                        }
                     }
 
                     loop {

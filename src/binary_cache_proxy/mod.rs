@@ -41,11 +41,7 @@ pub enum ErrorStrategy {
 
 async fn cache_info(server: State<Arc<Server>>) -> String {
     format!(
-        "\
-StoreDir: /nix/store
-WantMassQuery: 1
-Priority: {}
-",
+        "StoreDir: /nix/store\nWantMassQuery: 1\nPriority: {}\n",
         server.config.priority
     )
 }
@@ -80,6 +76,9 @@ impl CacheData {
                     .get_mut(&meta.priority)
                     .expect("Invalid state");
                 bucket.remove(&cache);
+                if bucket.is_empty() {
+                    self.priority_map.remove(&meta.priority);
+                }
                 self.priority_map.entry(priority).or_default().insert(cache);
                 meta.priority = priority;
             }
@@ -191,7 +190,9 @@ async fn proxy(server: State<Arc<Server>>, req: Request) -> impl IntoResponse {
                         },
                         Err(error) => {
                             tracing::error!(cache = %&*cache, %error, "Error fetching from cache");
-                            server.manage_tx.send(cache).await.unwrap();
+                            if let Some(tx) = &server.manage_tx {
+                                let _ = tx.send(cache).await;
+                            }
                         }
                     };
                 }
@@ -209,7 +210,9 @@ async fn proxy(server: State<Arc<Server>>, req: Request) -> impl IntoResponse {
         } else if timed_out {
             for &cache in &waiting_for {
                 tracing::error!(cache = %&**cache, deadline = ?timeout_duration, "Cache response exceeded deadline");
-                server.manage_tx.send(cache.clone()).await.unwrap();
+                if let Some(tx) = &server.manage_tx {
+                    let _ = tx.send(cache.clone()).await;
+                }
             }
         }
     }
@@ -232,7 +235,7 @@ pub struct Server {
     caches: ArcSwap<CacheData>,
     client: reqwest::Client,
     config: Config,
-    manage_tx: mpsc::Sender<Unique<Url>>,
+    manage_tx: Option<mpsc::Sender<Unique<Url>>>,
 }
 
 impl Server {
@@ -249,13 +252,12 @@ impl Server {
             caches.insert_cache(host.priority, host.error_strategy, url);
         }
 
-        let ugly_hack = if config.local_binary_caches.is_some() {
-            Some(Discover::run(set, config.clone(), keystore, token).await?)
+        let (manage_tx, manage_rx) = if config.local_binary_caches.is_some() {
+            let (tx, rx) = mpsc::channel(1);
+            (Some(tx), Some(rx))
         } else {
-            None
+            (None, None)
         };
-
-        let (manage_tx, mut manage_rx) = mpsc::channel(1);
 
         let ret = Arc::new(Self {
             caches: ArcSwap::new(Arc::new(caches)),
@@ -264,101 +266,249 @@ impl Server {
             manage_tx,
         });
 
-        tokio::spawn({
-            let server = ret.clone();
-            async move {
-                let Some(local_cache_config) = &server.config.local_binary_caches else {
-                    return;
-                };
+        if let (Some(mut manage_rx), Some(local_cache_config)) =
+            (manage_rx, ret.config.local_binary_caches.clone())
+        {
+            let (discover, mut events) =
+                Discover::run(set, ret.config.clone(), keystore, token).await?;
 
-                let Some((discover, mut events)) = ugly_hack else {
-                    return;
-                };
+            tokio::spawn({
+                let server = ret.clone();
+                async move {
+                    let mut interval =
+                        tokio::time::interval(local_cache_config.discovery_refresh_time);
+                    let (batch_timer, mut batch_timeout) = DynamicTimer::new();
+                    let mut batch: HashMap<Unique<Url>, std::net::IpAddr> = HashMap::default();
+                    let mut last_adv: Option<Instant> = None;
+                    let mut local_caches = HashMap::default();
 
-                let mut interval = tokio::time::interval(local_cache_config.discovery_refresh_time);
-                let (batch_timer, mut batch_timeout) = DynamicTimer::new();
-                let mut batch: HashMap<Unique<Url>, std::net::IpAddr> = HashMap::default();
-                let mut last_adv: Option<Instant> = None;
-                let mut local_caches = HashMap::default();
-
-                loop {
-                    tokio::select! {
-                        _ = interval.tick() => {
-                            match last_adv {
-                                Some(last_adv) if last_adv.elapsed() < local_cache_config.discovery_refresh_time => {}
-                                _ => {
-                                    discover.broadcast_req().await;
-                                }
-                            }
-                        }
-                        _ = batch_timeout.recv() => {
-                            let caches = server.caches.load();
-                            batch.retain(|k, _| !caches.contains(k));
-                            if !batch.is_empty() {
-                                let mut new_caches: CacheData = CacheData::clone(&caches);
-                                for (url, ip) in batch.drain() {
-                                    tracing::info!(cache = %&*url, %ip, "Found new local binary caches");
-                                    local_caches.insert(ip, url.clone());
-                                    new_caches.insert_cache(0, local_cache_config.error_strategy, url);
-                                }
-                                server.caches.store(Arc::new(new_caches));
-                            }
-                        }
-                        Some(bad_cache) = manage_rx.recv() => {
-                            let caches = server.caches.load();
-                            let mut new_caches = CacheData::clone(&caches);
-                            if let Some(meta) = new_caches.get_meta_mut(&bad_cache) {
-                                match meta.error_strategy {
-                                    ErrorStrategy::Remove => {
-                                        new_caches.remove(&bad_cache);
-                                        tracing::info!(cache = %&*bad_cache, "Removing bad cache");
-                                    }
-                                    ErrorStrategy::Timeout { timeout } => {
-                                        meta.timed_out_until = Some(Instant::now() + timeout);
-                                        tracing::info!(cache = %&*bad_cache, ?timeout, "Timed out cache");
+                    loop {
+                        tokio::select! {
+                            _ = interval.tick() => {
+                                match last_adv {
+                                    Some(last_adv) if last_adv.elapsed() < local_cache_config.discovery_refresh_time => {}
+                                    _ => {
+                                        discover.broadcast_req().await;
                                     }
                                 }
-                                server.caches.store(Arc::new(new_caches));
                             }
-                        }
-                        Some(event) = events.recv() => {
-                            match event {
-                                Event::NetworkChanged => {
-                                    let caches = server.caches.load();
-                                    let mut new_caches = CacheData::clone(&caches);
-                                    for (_, cache) in local_caches.drain() {
-                                        // TODO: if cache priority overwritten by url restore it
-                                        new_caches.remove(&cache);
+                            _ = batch_timeout.recv() => {
+                                let caches = server.caches.load();
+                                batch.retain(|k, _| !caches.contains(k));
+                                if !batch.is_empty() {
+                                    let mut new_caches: CacheData = CacheData::clone(&caches);
+                                    for (url, ip) in batch.drain() {
+                                        tracing::info!(cache = %&*url, %ip, "Found new local binary caches");
+                                        local_caches.insert(ip, url.clone());
+                                        new_caches.insert_cache(0, local_cache_config.error_strategy, url);
                                     }
                                     server.caches.store(Arc::new(new_caches));
-                                    discover.broadcast_req().await;
                                 }
-                                Event::Goodbye { source_ip } => {
-                                    if let Some(url) = local_caches.remove(&source_ip) {
+                            }
+                            Some(bad_cache) = manage_rx.recv() => {
+                                let caches = server.caches.load();
+                                let mut new_caches = CacheData::clone(&caches);
+                                if let Some(meta) = new_caches.get_meta_mut(&bad_cache) {
+                                    match meta.error_strategy {
+                                        ErrorStrategy::Remove => {
+                                            new_caches.remove(&bad_cache);
+                                            tracing::info!(cache = %&*bad_cache, "Removing bad cache");
+                                        }
+                                        ErrorStrategy::Timeout { timeout } => {
+                                            meta.timed_out_until = Some(Instant::now() + timeout);
+                                            tracing::info!(cache = %&*bad_cache, ?timeout, "Timed out cache");
+                                        }
+                                    }
+                                    server.caches.store(Arc::new(new_caches));
+                                }
+                            }
+                            Some(event) = events.recv() => {
+                                match event {
+                                    Event::NetworkChanged => {
                                         let caches = server.caches.load();
                                         let mut new_caches = CacheData::clone(&caches);
-                                        if new_caches.remove(&url) {
-                                            tracing::info!(url = %&*url, "Removed local binary cache")
+                                        for (_, cache) in local_caches.drain() {
+                                            // TODO: if cache priority overwritten by url restore it
+                                            new_caches.remove(&cache);
                                         }
                                         server.caches.store(Arc::new(new_caches));
+                                        discover.broadcast_req().await;
                                     }
-                                }
-                                Event::Adv {
-                                    source_ip,
-                                    binary_cache_url,
-                                } => {
-                                    last_adv = Some(Instant::now());
-                                    batch_timer.set_timeout(Duration::from_secs(1)).await;
-                                    let url = deduper.get_or_insert(binary_cache_url);
-                                    batch.insert(url, source_ip);
+                                    Event::Goodbye { source_ip } => {
+                                        if let Some(url) = local_caches.remove(&source_ip) {
+                                            let caches = server.caches.load();
+                                            let mut new_caches = CacheData::clone(&caches);
+                                            if new_caches.remove(&url) {
+                                                tracing::info!(url = %&*url, "Removed local binary cache")
+                                            }
+                                            server.caches.store(Arc::new(new_caches));
+                                        }
+                                    }
+                                    Event::Adv {
+                                        source_ip,
+                                        binary_cache_url,
+                                    } => {
+                                        last_adv = Some(Instant::now());
+                                        batch_timer.set_timeout(Duration::from_secs(1)).await;
+                                        let url = deduper.get_or_insert(binary_cache_url);
+                                        batch.insert(url, source_ip);
+                                    }
                                 }
                             }
                         }
                     }
                 }
-            }
-        });
+            });
+        }
 
         Ok(ret)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use dedup::Deduper;
+    use url::Url;
+
+    use super::*;
+
+    #[test]
+    fn insert_and_contains() {
+        let mut d = Deduper::new();
+        let a = d.get_or_insert(Url::parse("http://a.example").unwrap());
+        let b = d.get_or_insert(Url::parse("http://b.example").unwrap());
+
+        let mut c = CacheData::default();
+        c.insert_cache(5, ErrorStrategy::Remove, a.clone());
+        assert!(c.contains(&a));
+        assert!(!c.contains(&b));
+    }
+
+    #[test]
+    fn insert_twice_same_priority_is_noop() {
+        let mut d = Deduper::new();
+        let u = d.get_or_insert(Url::parse("http://a.example").unwrap());
+
+        let mut c = CacheData::default();
+        c.insert_cache(5, ErrorStrategy::Remove, u.clone());
+        c.insert_cache(5, ErrorStrategy::Remove, u.clone());
+        // Still one entry in the priority bucket.
+        let priorities: Vec<_> = c
+            .iter_priorities()
+            .map(|(p, urls)| (*p, urls.len()))
+            .collect();
+        assert_eq!(priorities, vec![(5, 1)]);
+    }
+
+    #[test]
+    fn reprioritize_moves_between_buckets() {
+        let mut d = Deduper::new();
+        let u = d.get_or_insert(Url::parse("http://a.example").unwrap());
+
+        let mut c = CacheData::default();
+        c.insert_cache(5, ErrorStrategy::Remove, u.clone());
+        c.insert_cache(3, ErrorStrategy::Remove, u.clone());
+
+        let priorities: Vec<_> = c
+            .iter_priorities()
+            .map(|(p, urls)| (*p, urls.len()))
+            .collect();
+        // Priority 5 bucket should be gone, priority 3 has the URL.
+        assert_eq!(priorities, vec![(3, 1)]);
+        assert_eq!(c.get_meta(&u).unwrap().priority, 3);
+    }
+
+    #[test]
+    fn remove_existing() {
+        let mut d = Deduper::new();
+        let u = d.get_or_insert(Url::parse("http://a.example").unwrap());
+
+        let mut c = CacheData::default();
+        c.insert_cache(5, ErrorStrategy::Remove, u.clone());
+        assert!(c.remove(&u));
+        assert!(!c.contains(&u));
+        assert!(c.iter_priorities().next().is_none());
+    }
+
+    #[test]
+    fn remove_nonexistent() {
+        let mut d = Deduper::new();
+        let u = d.get_or_insert(Url::parse("http://a.example").unwrap());
+
+        let mut c = CacheData::default();
+        assert!(!c.remove(&u));
+    }
+
+    #[test]
+    fn remove_last_in_bucket_cleans_priority() {
+        let mut d = Deduper::new();
+        let u = d.get_or_insert(Url::parse("http://a.example").unwrap());
+        let v = d.get_or_insert(Url::parse("http://b.example").unwrap());
+
+        let mut c = CacheData::default();
+        c.insert_cache(3, ErrorStrategy::Remove, u.clone());
+        c.insert_cache(5, ErrorStrategy::Remove, v.clone());
+
+        c.remove(&v);
+        let priorities: Vec<u8> = c.iter_priorities().map(|(p, _)| *p).collect();
+        assert_eq!(priorities, vec![3]);
+    }
+
+    #[test]
+    fn get_meta_and_get_meta_mut() {
+        let mut d = Deduper::new();
+        let u = d.get_or_insert(Url::parse("http://a.example").unwrap());
+        let nope = d.get_or_insert(Url::parse("http://nope.example").unwrap());
+
+        let mut c = CacheData::default();
+        c.insert_cache(
+            2,
+            ErrorStrategy::Timeout {
+                timeout: Duration::from_secs(30),
+            },
+            u.clone(),
+        );
+
+        let meta = c.get_meta(&u).unwrap();
+        assert_eq!(meta.priority, 2);
+        assert!(meta.timed_out_until.is_none());
+
+        c.get_meta_mut(&u).unwrap().timed_out_until = Some(Instant::now());
+        assert!(c.get_meta(&u).unwrap().timed_out_until.is_some());
+
+        assert!(c.get_meta(&nope).is_none());
+        assert!(c.get_meta_mut(&nope).is_none());
+    }
+
+    #[test]
+    fn iter_priorities_respects_order() {
+        let mut d = Deduper::new();
+        let a = d.get_or_insert(Url::parse("http://a.example").unwrap());
+        let b = d.get_or_insert(Url::parse("http://b.example").unwrap());
+        let c_url = d.get_or_insert(Url::parse("http://c.example").unwrap());
+
+        let mut c = CacheData::default();
+        c.insert_cache(9, ErrorStrategy::Remove, a);
+        c.insert_cache(1, ErrorStrategy::Remove, b);
+        c.insert_cache(5, ErrorStrategy::Remove, c_url);
+
+        let priorities: Vec<u8> = c.iter_priorities().map(|(p, _)| *p).collect();
+        assert_eq!(priorities, vec![1, 5, 9]);
+    }
+
+    #[test]
+    fn multiple_urls_same_priority() {
+        let mut d = Deduper::new();
+        let a = d.get_or_insert(Url::parse("http://a.example").unwrap());
+        let b = d.get_or_insert(Url::parse("http://b.example").unwrap());
+
+        let mut c = CacheData::default();
+        c.insert_cache(3, ErrorStrategy::Remove, a.clone());
+        c.insert_cache(3, ErrorStrategy::Remove, b.clone());
+
+        let (_, urls) = c.iter_priorities().next().unwrap();
+        assert_eq!(urls.len(), 2);
+        assert!(urls.contains(&a));
+        assert!(urls.contains(&b));
     }
 }
