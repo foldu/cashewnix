@@ -4,7 +4,6 @@
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
     flake-utils.url = "github:numtide/flake-utils";
-    crane.url = "github:ipetkov/crane";
   };
 
   outputs =
@@ -12,7 +11,6 @@
       self,
       nixpkgs,
       flake-utils,
-      crane,
     }:
     {
       nixosModules.cashewnix = import ./nix/module.nix { inherit self; };
@@ -22,55 +20,30 @@
       let
         pkgs = nixpkgs.legacyPackages.${system};
         lib = pkgs.lib;
-        craneLib = crane.mkLib nixpkgs.legacyPackages.${system};
-        src =
-          let
-            isData = path: _type: builtins.match ".*/data/.*" path != null;
-            isDeny = path: _type: builtins.match ".*deny\\.toml" != null;
-          in
-          pkgs.lib.cleanSourceWith {
-            src = craneLib.path ./.;
-            filter =
-              path: type: (isData path type) || (craneLib.filterCargoSources path type) || (isDeny path type);
-          };
-        commonArgs =
-          let
-            cargoToml = fromTOML (builtins.readFile "${self}/Cargo.toml");
-            version = cargoToml.package.version;
-            pname = cargoToml.package.name;
-          in
-          {
-            inherit src version pname;
-            strictDeps = true;
 
-            buildInputs = [
-              # Add additional build inputs here
-            ]
-            ++ lib.optionals pkgs.stdenv.hostPlatform.isDarwin [
-              # Additional darwin specific inputs can be set here
-              pkgs.libiconv
-            ];
+        commonArgs = {
+          pname = "cashewnix";
+          version = "0.1.0"; # keep in sync with Cargo.toml
 
-            # Additional environment variables can be set directly
-            # MY_CUSTOM_VAR = "some value";
-          };
-        cargoArtifacts = craneLib.buildDepsOnly commonArgs;
-        cashewnix = craneLib.buildPackage commonArgs // {
-          doCheck = false;
-          inherit cargoArtifacts;
+          # The whole git tree; gitignored paths are excluded automatically.
+          src = ./.;
+
+          # Unlike Cargo.toml, Cargo.lock is plain TOML 1.0, so no normalizer
+          # and no crane needed. buildRustPackage never parses Cargo.toml.
+          cargoLock.lockFile = ./Cargo.lock;
+
+          strictDeps = true;
+
+          buildInputs = lib.optionals pkgs.stdenv.hostPlatform.isDarwin [
+            pkgs.libiconv
+          ];
         };
+
+        cashewnix = pkgs.rustPlatform.buildRustPackage (commonArgs // { doCheck = false; });
       in
       {
         checks = {
-          # deny = craneLib.cargoDeny { inherit src; };
-          nextest = craneLib.cargoNextest (
-            commonArgs
-            // {
-              inherit cargoArtifacts;
-              partitions = 1;
-              partitionType = "count";
-            }
-          );
+          nextest = pkgs.rustPlatform.buildRustPackage (commonArgs // { useNextest = true; });
         }
         // lib.optionalAttrs pkgs.stdenv.hostPlatform.isLinux {
           smoke-test-nix-serve = import ./nix/tests/smoke-nix-serve.nix {
